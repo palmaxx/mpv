@@ -845,31 +845,7 @@ static void update_options(struct vo *vo)
 
 static void apply_target_contrast(struct priv *p, struct pl_color_space *color, float min_luma)
 {
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-
-    // Auto mode, use target value if available
-    if (!opts->target_contrast) {
-        color->hdr.min_luma = min_luma;
-        return;
-    }
-
-    // Infinite contrast
-    if (opts->target_contrast == -1) {
-        color->hdr.min_luma = 1e-7;
-        mp_assert(color->hdr.min_luma > 0);
-        return;
-    }
-
-    // Infer max_luma for current pl_color_space
-    pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-        .color = color,
-        // with HDR10 meta to respect value if already set
-        .metadata = PL_HDR_METADATA_HDR10,
-        .scaling = PL_HDR_NITS,
-        .out_max = &color->hdr.max_luma
-    ));
-
-    color->hdr.min_luma = color->hdr.max_luma / opts->target_contrast;
+    gpu_next_core_apply_target_contrast(p->opts_cache->opts, color, min_luma);
 }
 
 static void apply_target_options(struct priv *p, struct pl_frame *target,
@@ -999,162 +975,6 @@ static void update_tm_viz(struct pl_color_map_params *params,
 static void update_hook_opts_dynamic(struct priv *p, const struct pl_hook *hook,
                                      const struct mp_image *mpi);
 
-// What the shell must do with the swapchain colorspace hint after
-// compute_target_hint() has produced it. The hint math is kept free of any
-// swapchain access (sw->fns->target_csp is read by the shell and passed in;
-// set_colorspace_hint is driven by the shell per this action) so the same
-// computation can later back the render API, which has no pl_swapchain.
-enum target_hint_action {
-    TARGET_HINT_NONE = 0,   // leave the swapchain hint untouched
-    TARGET_HINT_SET,        // set_colorspace_hint(p, &hint)
-    TARGET_HINT_CLEAR,      // set_colorspace_hint(p, NULL)
-};
-
-// Pure (swapchain-free) computation of the libplacebo target colorspace
-// hint. *target_csp is the swapchain-reported target colorspace on input
-// (zeroed if the backend has no target_csp); it is post-processed in place
-// and also consumed by the caller afterwards. Behaviour is identical to the
-// inline block this was extracted from; only the two swapchain touchpoints
-// (target_csp read, set_colorspace_hint) live in the caller now.
-static enum target_hint_action compute_target_hint(struct priv *p,
-                                                   struct vo_frame *frame,
-                                                   const struct gl_video_opts *opts,
-                                                   struct pl_color_space *target_csp,
-                                                   struct pl_color_space *out_hint,
-                                                   bool *out_target_hint,
-                                                   bool *out_target_unknown)
-{
-    if (target_csp->primaries == PL_COLOR_PRIM_UNKNOWN)
-        target_csp->primaries = mp_get_best_prim_container(&target_csp->hdr.prim);
-    if (!pl_color_transfer_is_hdr(target_csp->transfer)) {
-        // limit min_luma to 1000:1 contrast ratio in SDR mode
-        if (target_csp->hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-            target_csp->hdr.min_luma = 0;
-    }
-    // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
-    // reports it as maxFALL directly, but this doesn't mean the same thing.
-    target_csp->hdr.max_fall = 0;
-
-    struct pl_color_space hint = {0};
-    bool target_hint = p->next_opts->target_hint == 1 ||
-                       (p->next_opts->target_hint == -1 &&
-                        target_csp->transfer != PL_COLOR_TRC_UNKNOWN);
-    // Assume HDR is supported, if target_csp() is not available
-    // TODO: Remove this fallback when all backends support target_csp()
-    bool target_unknown = target_csp->transfer == PL_COLOR_TRC_UNKNOWN;
-    if (target_unknown) {
-        *target_csp = (struct pl_color_space){
-            .transfer = opts->target_trc ? opts->target_trc : pl_color_space_hdr10.transfer };
-    }
-    enum target_hint_action action = TARGET_HINT_NONE;
-    if (target_hint && frame->current) {
-        const struct pl_color_space *source = &frame->current->params.color;
-        const struct pl_color_space *target = target_csp;
-        hint = *source;
-        // Apply target contrast to the hint, this is important for SDR, because
-        // libplacebo defaults to 1000:1 contrast ratio otherwise.
-        if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target->hdr.min_luma;
-        if (p->next_opts->target_hint_mode == 0) {
-            hint = *target;
-            if (pl_color_transfer_is_hdr(hint.transfer) && !pl_primaries_valid(&hint.hdr.prim))
-                pl_color_space_merge(&hint, source);
-            if (target_unknown && !opts->target_trc && !pl_color_transfer_is_hdr(source->transfer))
-                hint = *source;
-            // Restore target luminance if it was present, note that we check
-            // max_luma only, this make sure that max_cll/max_fall is not take
-            // from source.
-            if (target->hdr.max_luma) {
-                hint.hdr.max_luma = target->hdr.max_luma;
-                hint.hdr.min_luma = target->hdr.min_luma;
-                hint.hdr.max_cll  = target->hdr.max_cll;
-                hint.hdr.max_fall = target->hdr.max_fall;
-            }
-        }
-        if (p->next_opts->target_hint_mode == 2) { // source-dynamic
-            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-                .color      = &hint,
-                .metadata   = PL_HDR_METADATA_ANY,
-                .scaling    = PL_HDR_NITS,
-                .out_min    = !hint.hdr.min_luma ? &hint.hdr.min_luma : NULL,
-                .out_max    = &hint.hdr.max_luma,
-            ));
-            // Set maxCLL to dynamic max luminance. Note that libplacebo uses
-            // max luminace as maxCLL in practice.
-            hint.hdr.max_cll = hint.hdr.max_luma;
-            // Keep maxFALL from static metadata, unless its value is too high.
-            // Could be set to 0, but let's keep it for now.
-            if (hint.hdr.max_fall > hint.hdr.max_cll)
-                hint.hdr.max_fall = 0;
-        }
-        // Infer missing bits now. This is important so that we don't lose
-        // information after user option overrides. For example, if the user
-        // sets target_trc to PQ, but the hint(source) is SDR, we want to fill
-        // in SDR luminance values instead of the default PQ range.
-        struct pl_color_space source_csp = *source;
-        pl_color_space_infer_map(&source_csp, &hint);
-        // Always prefer target luminance and transfer for inverse tone mapping
-        if (pl_color_transfer_is_hdr(target->transfer) && opts->tone_map.inverse) {
-            hint.transfer     = target->transfer;
-            hint.hdr.max_luma = target->hdr.max_luma;
-            hint.hdr.min_luma = target->hdr.min_luma;
-            hint.hdr.max_cll  = target->hdr.max_cll;
-            hint.hdr.max_fall = target->hdr.max_fall;
-        }
-        if (opts->target_prim)
-            hint.primaries = opts->target_prim;
-        if (opts->target_gamut)
-            mp_parse_raw_primaries(mp_null_log, opts->target_gamut, &hint.hdr.prim);
-        if (opts->target_trc)
-            hint.transfer = opts->target_trc;
-        if (opts->target_peak)
-            hint.hdr.max_luma = opts->target_peak;
-        if (opts->hdr_reference_white && !pl_color_transfer_is_hdr(hint.transfer))
-            hint.hdr.max_luma = opts->hdr_reference_white;
-        // Always set maxCLL, display uses this metadata and we shouldn't let it
-        // fallback to default value.
-        if (!hint.hdr.max_cll)
-            hint.hdr.max_cll = hint.hdr.max_luma;
-        // If tone mapping is required, adjust maxCLL and maxFALL
-        if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse) {
-            // Set maxCLL to the target luminance if it's not already lower
-            if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll || opts->tone_map.inverse)
-                hint.hdr.max_cll = hint.hdr.max_luma;
-            // There's no reliable way to estimate maxFALL here
-            hint.hdr.max_fall = 0;
-        }
-        if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
-            hint.hdr.max_fall = 0;
-        apply_target_contrast(p, &hint, hint.hdr.min_luma);
-        if (p->icc_profile)
-            hint = p->icc_profile->csp;
-        if (opts->icc_opts->icc_use_luma) {
-            p->icc_params.max_luma = 0.0f;
-        } else {
-            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-                .color    = &hint,
-                .metadata = PL_HDR_METADATA_HDR10, // use only static HDR nits
-                .scaling  = PL_HDR_NITS,
-                .out_max  = &p->icc_params.max_luma,
-            ));
-        }
-        pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
-        // Update again after possible max_luma change
-        if (p->icc_profile)
-            hint = p->icc_profile->csp;
-        action = TARGET_HINT_SET;
-    } else if (!target_hint) {
-        if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target_csp->hdr.min_luma;
-        action = TARGET_HINT_CLEAR;
-    }
-
-    *out_hint = hint;
-    *out_target_hint = target_hint;
-    *out_target_unknown = target_unknown;
-    return action;
-}
-
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
@@ -1245,7 +1065,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
 
     // Swapchain touchpoint 1/2: read the backend-reported target colorspace.
-    // The hint math itself is swapchain-free (see compute_target_hint).
+    // The hint math itself is swapchain-free (gpu_next_core_target_hint).
     struct pl_color_space target_csp = {0};
     // TODO: Implement this for all backends
     if (sw->fns->target_csp)
@@ -1253,9 +1073,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
     struct pl_color_space hint;
     bool target_hint, target_unknown;
-    enum target_hint_action hint_action =
-        compute_target_hint(p, frame, opts, &target_csp, &hint,
-                            &target_hint, &target_unknown);
+    const struct pl_color_space *source =
+        frame->current ? &frame->current->params.color : NULL;
+    enum target_hint_action hint_action = gpu_next_core_target_hint(
+        opts, p->next_opts->target_hint, p->next_opts->target_hint_mode,
+        source, p->pllog, &p->icc_profile, &p->icc_params,
+        &target_csp, &hint, &target_hint, &target_unknown);
 
     // Swapchain touchpoint 2/2: push the computed hint and read back the
     // colorspace the swapchain negotiated (external_params/hint).
