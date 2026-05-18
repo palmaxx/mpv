@@ -50,6 +50,7 @@
 #include "gpu/video_shaders.h"
 #include "sub/osd.h"
 #include "gpu_next/context.h"
+#include "gpu_next/core.h"
 
 #if HAVE_GL && defined(PL_HAVE_OPENGL)
 #include <libplacebo/opengl.h>
@@ -117,10 +118,7 @@ struct priv {
     struct timer_pool *sw_upload_timer;
     struct mp_pass_perf sw_upload_perf;
 
-    // Allocated DR buffers
-    mp_mutex dr_lock;
-    pl_buf *dr_buffers;
-    int num_dr_buffers;
+    struct gpu_next_core *core;
 
     pl_log pllog;
     pl_gpu gpu;
@@ -238,78 +236,11 @@ const struct m_sub_options gl_next_conf = {
     .change_flags = UPDATE_VIDEO,
 };
 
-static pl_buf get_dr_buf(struct priv *p, const uint8_t *ptr)
-{
-    mp_mutex_lock(&p->dr_lock);
-
-    for (int i = 0; i < p->num_dr_buffers; i++) {
-        pl_buf buf = p->dr_buffers[i];
-        if (ptr >= buf->data && ptr < buf->data + buf->params.size) {
-            mp_mutex_unlock(&p->dr_lock);
-            return buf;
-        }
-    }
-
-    mp_mutex_unlock(&p->dr_lock);
-    return NULL;
-}
-
-static void free_dr_buf(void *opaque, uint8_t *data)
-{
-    struct priv *p = opaque;
-    mp_mutex_lock(&p->dr_lock);
-
-    for (int i = 0; i < p->num_dr_buffers; i++) {
-        if (p->dr_buffers[i]->data == data) {
-            pl_buf_destroy(p->gpu, &p->dr_buffers[i]);
-            MP_TARRAY_REMOVE_AT(p->dr_buffers, p->num_dr_buffers, i);
-            mp_mutex_unlock(&p->dr_lock);
-            return;
-        }
-    }
-
-    MP_ASSERT_UNREACHABLE();
-}
-
 static struct mp_image *get_image(struct vo *vo, int imgfmt, int w, int h,
                                   int stride_align, int flags)
 {
     struct priv *p = vo->priv;
-    pl_gpu gpu = p->gpu;
-    if (!gpu->limits.thread_safe || !gpu->limits.max_mapped_size)
-        return NULL;
-
-    if ((flags & VO_DR_FLAG_HOST_CACHED) && !gpu->limits.host_cached)
-        return NULL;
-
-    stride_align = mp_lcm(stride_align, gpu->limits.align_tex_xfer_pitch);
-    stride_align = mp_lcm(stride_align, gpu->limits.align_tex_xfer_offset);
-    int size = mp_image_get_alloc_size(imgfmt, w, h, stride_align);
-    if (size < 0)
-        return NULL;
-
-    pl_buf buf = pl_buf_create(gpu, &(struct pl_buf_params) {
-        .memory_type = PL_BUF_MEM_HOST,
-        .host_mapped = true,
-        .size = size + stride_align,
-    });
-
-    if (!buf)
-        return NULL;
-
-    struct mp_image *mpi = mp_image_from_buffer(imgfmt, w, h, stride_align,
-                                                buf->data, buf->params.size,
-                                                p, free_dr_buf);
-    if (!mpi) {
-        pl_buf_destroy(gpu, &buf);
-        return NULL;
-    }
-
-    mp_mutex_lock(&p->dr_lock);
-    MP_TARRAY_APPEND(p, p->dr_buffers, p->num_dr_buffers, buf);
-    mp_mutex_unlock(&p->dr_lock);
-
-    return mpi;
+    return gpu_next_core_get_image(p->core, imgfmt, w, h, stride_align, flags);
 }
 
 static void update_overlays(struct vo *vo, struct mp_osd_res res,
@@ -794,7 +725,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
                 data[n].row_stride = mpi->stride[n];
             }
 
-            pl_buf buf = get_dr_buf(p, data[n].pixels);
+            pl_buf buf = gpu_next_core_get_dr_buf(p->core, data[n].pixels);
             if (buf) {
                 data[n].buf = buf;
                 data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
@@ -2193,8 +2124,7 @@ static void uninit(struct vo *vo)
         hwdec_devices_destroy(vo->hwdec_devs);
     }
 
-    mp_assert(p->num_dr_buffers == 0);
-    mp_mutex_destroy(&p->dr_lock);
+    gpu_next_core_destroy(&p->core);
 
     cache_uninit(p, &p->shader_cache);
     cache_uninit(p, &p->icc_cache);
@@ -2257,7 +2187,7 @@ static int preinit(struct vo *vo)
     vo->hwdec_devs = hwdec_devices_create();
     hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
     ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
-    mp_mutex_init(&p->dr_lock);
+    p->core = gpu_next_core_create(p->gpu);
 
     if (gl_opts->shader_cache)
         cache_init(vo, &p->shader_cache, 10 << 20, gl_opts->shader_cache_dir);
