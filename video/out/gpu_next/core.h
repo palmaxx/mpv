@@ -17,9 +17,15 @@
 
 #pragma once
 
+#include <stdbool.h>
+
+#include <libplacebo/colorspace.h>
 #include <libplacebo/gpu.h>
+#include <libplacebo/log.h>
+#include <libplacebo/shaders/icc.h>
 
 struct mp_image;
+struct gl_video_opts;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
@@ -41,3 +47,36 @@ pl_buf gpu_next_core_get_dr_buf(struct gpu_next_core *core, const uint8_t *ptr);
 struct mp_image *gpu_next_core_get_image(struct gpu_next_core *core,
                                          int imgfmt, int w, int h,
                                          int stride_align, int flags);
+
+// Apply the target-contrast option to a colorspace (pure; no swapchain).
+void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
+                                         struct pl_color_space *color,
+                                         float min_luma);
+
+// What the caller must do with the swapchain colorspace hint after
+// gpu_next_core_target_hint() produced it. The hint math is kept free of
+// any swapchain access (the backend-reported target colorspace is passed
+// in via target_csp; set_colorspace_hint is driven by the caller per this
+// action) so the same computation backs both the windowed VO and the
+// libmpv render API, which has no pl_swapchain.
+enum target_hint_action {
+    TARGET_HINT_NONE = 0,   // leave the swapchain hint untouched
+    TARGET_HINT_SET,        // hint(&out_hint)
+    TARGET_HINT_CLEAR,      // hint(NULL)
+};
+
+// Pure (swapchain-free) computation of the libplacebo target colorspace
+// hint. target_csp is the backend-reported target colorspace on input
+// (zeroed if unavailable); it is post-processed in place and also consumed
+// by the caller afterwards. source is the current frame's colorspace, or
+// NULL if there is no current frame. target_hint/target_hint_mode are the
+// corresponding gl_next_opts fields. icc_profile/icc_params are updated in
+// place (pl_icc_update). Behaviour is identical to the inline block this
+// was extracted from.
+enum target_hint_action gpu_next_core_target_hint(
+    const struct gl_video_opts *opts, int target_hint, int target_hint_mode,
+    const struct pl_color_space *source, pl_log pllog,
+    pl_icc_object *icc_profile, struct pl_icc_params *icc_params,
+    float target_ref_luma, struct pl_color_space *target_csp,
+    struct pl_color_space *out_hint, bool *out_target_hint,
+    bool *out_target_unknown);
