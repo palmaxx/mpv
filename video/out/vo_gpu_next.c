@@ -999,125 +999,57 @@ static void update_tm_viz(struct pl_color_map_params *params,
 static void update_hook_opts_dynamic(struct priv *p, const struct pl_hook *hook,
                                      const struct mp_image *mpi);
 
-static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+// What the shell must do with the swapchain colorspace hint after
+// compute_target_hint() has produced it. The hint math is kept free of any
+// swapchain access (sw->fns->target_csp is read by the shell and passed in;
+// set_colorspace_hint is driven by the shell per this action) so the same
+// computation can later back the render API, which has no pl_swapchain.
+enum target_hint_action {
+    TARGET_HINT_NONE = 0,   // leave the swapchain hint untouched
+    TARGET_HINT_SET,        // set_colorspace_hint(p, &hint)
+    TARGET_HINT_CLEAR,      // set_colorspace_hint(p, NULL)
+};
+
+// Pure (swapchain-free) computation of the libplacebo target colorspace
+// hint. *target_csp is the swapchain-reported target colorspace on input
+// (zeroed if the backend has no target_csp); it is post-processed in place
+// and also consumed by the caller afterwards. Behaviour is identical to the
+// inline block this was extracted from; only the two swapchain touchpoints
+// (target_csp read, set_colorspace_hint) live in the caller now.
+static enum target_hint_action compute_target_hint(struct priv *p,
+                                                   struct vo_frame *frame,
+                                                   const struct gl_video_opts *opts,
+                                                   struct pl_color_space *target_csp,
+                                                   struct pl_color_space *out_hint,
+                                                   bool *out_target_hint,
+                                                   bool *out_target_unknown)
 {
-    struct priv *p = vo->priv;
-    pl_options pars = p->pars;
-    pl_gpu gpu = p->gpu;
-    update_options(vo);
-
-    struct pl_render_params params = pars->params;
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
-    bool cache_frame = will_redraw || frame->still || p->paused;
-    bool can_interpolate = opts->interpolation && frame->display_synced &&
-                           !frame->still && frame->num_frames > 1 && !p->paused;
-    double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
-    params.info_callback = info_callback;
-    params.info_priv = vo;
-    params.skip_caching_single_frame = !cache_frame;
-    params.preserve_mixing_cache = p->next_opts->inter_preserve && !frame->still;
-    if (frame->still || p->paused)
-        params.frame_mixer = NULL;
-
-    if (frame->current && frame->current->params.vflip) {
-        pl_matrix2x2 m = { .m = {{1, 0}, {0, -1}}, };
-        pars->distort_params.transform.mat = m;
-        params.distort_params = &pars->distort_params;
-    } else {
-        params.distort_params = NULL;
-    }
-
-    // pl_queue advances its internal virtual PTS and culls available frames
-    // based on this value and the VPS/FPS ratio. Requesting a non-monotonic PTS
-    // is an invalid use of pl_queue. Reset it if this happens in an attempt to
-    // recover as much as possible. Ideally, this should never occur, and if it
-    // does, it should be corrected. The ideal_frame_vsync may be negative if
-    // the last draw did not align perfectly with the vsync. In this case, we
-    // should have the previous frame available in pl_queue, or a reset is
-    // already requested. Clamp the check to 0, as we don't have the previous
-    // frame in vo_frame anyway.
-    struct pl_source_frame vpts;
-    if (frame->current && !p->want_reset) {
-        if (pl_queue_peek(p->queue, 0, &vpts) &&
-            frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
-        {
-            MP_VERBOSE(vo, "Forcing queue refill, PTS(%f + %f | %f) < VPTS(%f)\n",
-                       frame->current->pts, pts_offset,
-                       frame->ideal_frame_vsync_duration, vpts.pts);
-            p->want_reset = true;
-        }
-    }
-
-    // Push all incoming frames into the frame queue
-    for (int n = 0; n < frame->num_frames; n++) {
-        int id = frame->frame_id + n;
-
-        if (p->want_reset) {
-            pl_queue_reset(p->queue);
-            p->last_pts = 0.0;
-            p->last_id = 0;
-            p->want_reset = false;
-            p->flush_cache = true;
-        }
-
-        if (p->flush_cache) {
-            pl_renderer_flush_cache(p->rr);
-            p->flush_cache = false;
-        }
-
-        if (id <= p->last_id)
-            continue; // ignore already seen frames
-
-        struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
-        struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
-        mpi->priv = fp;
-        fp->vo = vo;
-
-        pl_queue_push(p->queue, &(struct pl_source_frame) {
-            .pts = mpi->pts,
-            .duration = can_interpolate ? frame->approx_duration : 0,
-            .frame_data = mpi,
-            .map = map_frame,
-            .unmap = unmap_frame,
-            .discard = discard_frame,
-        });
-
-        p->last_id = id;
-    }
-
-    struct ra_swapchain *sw = p->ra_ctx->swapchain;
-
-    struct pl_color_space target_csp = {0};
-    // TODO: Implement this for all backends
-    if (sw->fns->target_csp)
-        target_csp = sw->fns->target_csp(sw);
-    if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
-        target_csp.primaries = mp_get_best_prim_container(&target_csp.hdr.prim);
-    if (!pl_color_transfer_is_hdr(target_csp.transfer)) {
+    if (target_csp->primaries == PL_COLOR_PRIM_UNKNOWN)
+        target_csp->primaries = mp_get_best_prim_container(&target_csp->hdr.prim);
+    if (!pl_color_transfer_is_hdr(target_csp->transfer)) {
         // limit min_luma to 1000:1 contrast ratio in SDR mode
-        if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-            target_csp.hdr.min_luma = 0;
+        if (target_csp->hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
+            target_csp->hdr.min_luma = 0;
     }
     // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
     // reports it as maxFALL directly, but this doesn't mean the same thing.
-    target_csp.hdr.max_fall = 0;
+    target_csp->hdr.max_fall = 0;
 
     struct pl_color_space hint = {0};
     bool target_hint = p->next_opts->target_hint == 1 ||
                        (p->next_opts->target_hint == -1 &&
-                        target_csp.transfer != PL_COLOR_TRC_UNKNOWN);
+                        target_csp->transfer != PL_COLOR_TRC_UNKNOWN);
     // Assume HDR is supported, if target_csp() is not available
     // TODO: Remove this fallback when all backends support target_csp()
-    bool target_unknown = target_csp.transfer == PL_COLOR_TRC_UNKNOWN;
+    bool target_unknown = target_csp->transfer == PL_COLOR_TRC_UNKNOWN;
     if (target_unknown) {
-        target_csp = (struct pl_color_space){
+        *target_csp = (struct pl_color_space){
             .transfer = opts->target_trc ? opts->target_trc : pl_color_space_hdr10.transfer };
     }
-    bool external_params = false;
+    enum target_hint_action action = TARGET_HINT_NONE;
     if (target_hint && frame->current) {
         const struct pl_color_space *source = &frame->current->params.color;
-        const struct pl_color_space *target = &target_csp;
+        const struct pl_color_space *target = target_csp;
         hint = *source;
         // Apply target contrast to the hint, this is important for SDR, because
         // libplacebo defaults to 1000:1 contrast ratio otherwise.
@@ -1210,10 +1142,127 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // Update again after possible max_luma change
         if (p->icc_profile)
             hint = p->icc_profile->csp;
-        external_params = set_colorspace_hint(p, &hint);
+        action = TARGET_HINT_SET;
     } else if (!target_hint) {
         if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target_csp.hdr.min_luma;
+            hint.hdr.min_luma = target_csp->hdr.min_luma;
+        action = TARGET_HINT_CLEAR;
+    }
+
+    *out_hint = hint;
+    *out_target_hint = target_hint;
+    *out_target_unknown = target_unknown;
+    return action;
+}
+
+static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+{
+    struct priv *p = vo->priv;
+    pl_options pars = p->pars;
+    pl_gpu gpu = p->gpu;
+    update_options(vo);
+
+    struct pl_render_params params = pars->params;
+    const struct gl_video_opts *opts = p->opts_cache->opts;
+    bool will_redraw = frame->display_synced && frame->num_vsyncs > 1;
+    bool cache_frame = will_redraw || frame->still || p->paused;
+    bool can_interpolate = opts->interpolation && frame->display_synced &&
+                           !frame->still && frame->num_frames > 1 && !p->paused;
+    double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
+    params.info_callback = info_callback;
+    params.info_priv = vo;
+    params.skip_caching_single_frame = !cache_frame;
+    params.preserve_mixing_cache = p->next_opts->inter_preserve && !frame->still;
+    if (frame->still || p->paused)
+        params.frame_mixer = NULL;
+
+    if (frame->current && frame->current->params.vflip) {
+        pl_matrix2x2 m = { .m = {{1, 0}, {0, -1}}, };
+        pars->distort_params.transform.mat = m;
+        params.distort_params = &pars->distort_params;
+    } else {
+        params.distort_params = NULL;
+    }
+
+    // pl_queue advances its internal virtual PTS and culls available frames
+    // based on this value and the VPS/FPS ratio. Requesting a non-monotonic PTS
+    // is an invalid use of pl_queue. Reset it if this happens in an attempt to
+    // recover as much as possible. Ideally, this should never occur, and if it
+    // does, it should be corrected. The ideal_frame_vsync may be negative if
+    // the last draw did not align perfectly with the vsync. In this case, we
+    // should have the previous frame available in pl_queue, or a reset is
+    // already requested. Clamp the check to 0, as we don't have the previous
+    // frame in vo_frame anyway.
+    struct pl_source_frame vpts;
+    if (frame->current && !p->want_reset) {
+        if (pl_queue_peek(p->queue, 0, &vpts) &&
+            frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
+        {
+            MP_VERBOSE(vo, "Forcing queue refill, PTS(%f + %f | %f) < VPTS(%f)\n",
+                       frame->current->pts, pts_offset,
+                       frame->ideal_frame_vsync_duration, vpts.pts);
+            p->want_reset = true;
+        }
+    }
+
+    // Push all incoming frames into the frame queue
+    for (int n = 0; n < frame->num_frames; n++) {
+        int id = frame->frame_id + n;
+
+        if (p->want_reset) {
+            pl_queue_reset(p->queue);
+            p->last_pts = 0.0;
+            p->last_id = 0;
+            p->want_reset = false;
+            p->flush_cache = true;
+        }
+
+        if (p->flush_cache) {
+            pl_renderer_flush_cache(p->rr);
+            p->flush_cache = false;
+        }
+
+        if (id <= p->last_id)
+            continue; // ignore already seen frames
+
+        struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
+        struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
+        mpi->priv = fp;
+        fp->vo = vo;
+
+        pl_queue_push(p->queue, &(struct pl_source_frame) {
+            .pts = mpi->pts,
+            .duration = can_interpolate ? frame->approx_duration : 0,
+            .frame_data = mpi,
+            .map = map_frame,
+            .unmap = unmap_frame,
+            .discard = discard_frame,
+        });
+
+        p->last_id = id;
+    }
+
+    struct ra_swapchain *sw = p->ra_ctx->swapchain;
+
+    // Swapchain touchpoint 1/2: read the backend-reported target colorspace.
+    // The hint math itself is swapchain-free (see compute_target_hint).
+    struct pl_color_space target_csp = {0};
+    // TODO: Implement this for all backends
+    if (sw->fns->target_csp)
+        target_csp = sw->fns->target_csp(sw);
+
+    struct pl_color_space hint;
+    bool target_hint, target_unknown;
+    enum target_hint_action hint_action =
+        compute_target_hint(p, frame, opts, &target_csp, &hint,
+                            &target_hint, &target_unknown);
+
+    // Swapchain touchpoint 2/2: push the computed hint and read back the
+    // colorspace the swapchain negotiated (external_params/hint).
+    bool external_params = false;
+    if (hint_action == TARGET_HINT_SET) {
+        external_params = set_colorspace_hint(p, &hint);
+    } else if (hint_action == TARGET_HINT_CLEAR) {
         external_params = set_colorspace_hint(p, NULL);
     }
 
