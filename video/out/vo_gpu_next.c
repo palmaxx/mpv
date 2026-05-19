@@ -1143,15 +1143,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
     // Render frame
     stats_time_start(p->stats, "render");
-    bool render_ok = pl_render_image_mix(gpu_next_core_renderer(p->core), &mix, &target, &params);
+    bool render_ok = gpu_next_core_render_mix(p->core, &mix, &target, &params);
     stats_time_end(p->stats, "render");
     if (!render_ok) {
         MP_ERR(vo, "Failed rendering frame!\n");
         goto done;
     }
-
-    struct pl_frame ref_frame;
-    pl_frames_infer_mix(gpu_next_core_renderer(p->core), &mix, &target, &ref_frame);
 
     mp_mutex_lock(&vo->params_mutex);
     p->target_params = (struct mp_image_params){
@@ -1167,7 +1164,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
     if (vo->params) {
         // Augment metadata with peak detection max_pq_y / avg_pq_y
-        vo->has_peak_detect_values = pl_renderer_get_hdr_metadata(gpu_next_core_renderer(p->core), &vo->params->color.hdr);
+        vo->has_peak_detect_values = gpu_next_core_get_hdr_metadata(p->core, &vo->params->color.hdr);
     }
     mp_mutex_unlock(&vo->params_mutex);
 
@@ -1468,7 +1465,7 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
         image.num_overlays = 0;
     }
 
-    if (!pl_render_image(gpu_next_core_renderer(p->core), &image, &target, &params)) {
+    if (!gpu_next_core_render_image(p->core, &image, &target, &params)) {
         MP_ERR(vo, "Failed rendering frame!\n");
         goto done;
     }
