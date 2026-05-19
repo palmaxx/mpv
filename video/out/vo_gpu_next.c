@@ -113,7 +113,6 @@ struct priv {
 
     pl_log pllog;
     pl_gpu gpu;
-    pl_renderer rr;
     pl_queue queue;
     pl_swapchain sw;
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
@@ -913,7 +912,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         }
 
         if (p->flush_cache) {
-            pl_renderer_flush_cache(p->rr);
+            pl_renderer_flush_cache(gpu_next_core_renderer(p->core));
             p->flush_cache = false;
         }
 
@@ -1145,7 +1144,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
     // Render frame
     stats_time_start(p->stats, "render");
-    bool render_ok = pl_render_image_mix(p->rr, &mix, &target, &params);
+    bool render_ok = pl_render_image_mix(gpu_next_core_renderer(p->core), &mix, &target, &params);
     stats_time_end(p->stats, "render");
     if (!render_ok) {
         MP_ERR(vo, "Failed rendering frame!\n");
@@ -1153,7 +1152,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     }
 
     struct pl_frame ref_frame;
-    pl_frames_infer_mix(p->rr, &mix, &target, &ref_frame);
+    pl_frames_infer_mix(gpu_next_core_renderer(p->core), &mix, &target, &ref_frame);
 
     mp_mutex_lock(&vo->params_mutex);
     p->target_params = (struct mp_image_params){
@@ -1169,7 +1168,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
     if (vo->params) {
         // Augment metadata with peak detection max_pq_y / avg_pq_y
-        vo->has_peak_detect_values = pl_renderer_get_hdr_metadata(p->rr, &vo->params->color.hdr);
+        vo->has_peak_detect_values = pl_renderer_get_hdr_metadata(gpu_next_core_renderer(p->core), &vo->params->color.hdr);
     }
     mp_mutex_unlock(&vo->params_mutex);
 
@@ -1470,7 +1469,7 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
         image.num_overlays = 0;
     }
 
-    if (!pl_render_image(p->rr, &image, &target, &params)) {
+    if (!pl_render_image(gpu_next_core_renderer(p->core), &image, &target, &params)) {
         MP_ERR(vo, "Failed rendering frame!\n");
         goto done;
     }
@@ -1879,7 +1878,6 @@ static void uninit(struct vo *vo)
     pl_lut_free(&p->next_opts->target_lut.lut);
 
     pl_icc_close(&p->icc_profile);
-    pl_renderer_destroy(&p->rr);
 
     for (int i = 0; i < VO_PASS_PERF_MAX; ++i) {
         pl_shader_info_deref(&p->perf_fresh.info[i].shader);
@@ -1930,7 +1928,6 @@ static int preinit(struct vo *vo)
     vo->hwdec_devs = hwdec_devices_create();
     hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
     ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
-    p->core = gpu_next_core_create(p->gpu, p->log, p->pllog);
 
     if (gl_opts->shader_cache)
         cache_init(vo, &p->shader_cache, 10 << 20, gl_opts->shader_cache_dir);
@@ -1938,7 +1935,7 @@ static int preinit(struct vo *vo)
         cache_init(vo, &p->icc_cache, 20 << 20, gl_opts->icc_opts->cache_dir);
 
     pl_gpu_set_cache(p->gpu, p->shader_cache.cache);
-    p->rr = pl_renderer_create(p->pllog, p->gpu);
+    p->core = gpu_next_core_create(p->gpu, p->log, p->pllog);
     p->queue = pl_queue_create(p->gpu);
     p->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(p->gpu, "r8");
     p->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(p->gpu, "bgra8");
