@@ -50,6 +50,9 @@ void gpu_next_core_destroy(struct gpu_next_core **core);
 // front-end populates pars->params before driving the render.
 pl_options gpu_next_core_options(struct gpu_next_core *core);
 
+// The libplacebo renderer owned by the core.
+pl_renderer gpu_next_core_renderer(struct gpu_next_core *core);
+
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
 // if it is not a direct-rendering allocation (frame-upload fast path).
 pl_buf gpu_next_core_get_dr_buf(struct gpu_next_core *core, const uint8_t *ptr);
