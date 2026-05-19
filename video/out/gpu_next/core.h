@@ -30,6 +30,8 @@
 
 struct mp_image;
 struct mp_log;
+struct mpv_global;
+struct pl_hook;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
@@ -68,6 +70,13 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 const struct pl_filter_config *gpu_next_core_map_scaler(
     struct gpu_next_core *core, const struct gl_video_opts *opts,
     enum scaler_unit unit);
+
+// Load (and cache, across options updates) the user shader at the given
+// path as a libplacebo hook, or NULL on failure/empty path. The cache is
+// owned by the core and freed in gpu_next_core_destroy().
+const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
+                                              struct mpv_global *global,
+                                              const char *path);
 
 // Apply the target-contrast option to a colorspace (pure; no swapchain).
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,

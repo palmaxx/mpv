@@ -20,10 +20,13 @@
 #include <math.h>
 
 #include <libplacebo/filters.h>
+#include <libplacebo/shaders/custom.h>
 
 #include "common/common.h"
 #include "common/msg.h"
+#include "options/path.h"
 #include "osdep/threads.h"
+#include "stream/stream.h"
 #include "video/csputils.h"
 #include "video/mp_image.h"
 #include "video/out/gpu/video.h"
@@ -31,6 +34,11 @@
 
 struct scaler_params {
     struct pl_filter_config config;
+};
+
+struct user_hook {
+    char *path;
+    const struct pl_hook *hook;
 };
 
 struct gpu_next_core {
@@ -43,6 +51,10 @@ struct gpu_next_core {
     int num_dr_buffers;
 
     struct scaler_params scalers[SCALER_COUNT];
+
+    // Cached shaders, preserved across options updates
+    struct user_hook *user_hooks;
+    int num_user_hooks;
 };
 
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log)
@@ -59,6 +71,9 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
     struct gpu_next_core *core = *core_ptr;
     if (!core)
         return;
+
+    for (int i = 0; i < core->num_user_hooks; i++)
+        pl_mpv_user_shader_destroy(&core->user_hooks[i].hook);
 
     mp_assert(core->num_dr_buffers == 0);
     mp_mutex_destroy(&core->dr_lock);
@@ -337,6 +352,34 @@ const struct pl_filter_config *gpu_next_core_map_scaler(
     }
 
     return &par->config;
+}
+
+const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
+                                              struct mpv_global *global,
+                                              const char *path)
+{
+    if (!path || !path[0])
+        return NULL;
+
+    for (int i = 0; i < core->num_user_hooks; i++) {
+        if (strcmp(core->user_hooks[i].path, path) == 0)
+            return core->user_hooks[i].hook;
+    }
+
+    char *fname = mp_get_user_path(NULL, global, path);
+    bstr shader = stream_read_file(fname, core, global, 1000000000); // 1GB
+    talloc_free(fname);
+
+    const struct pl_hook *hook = NULL;
+    if (shader.len)
+        hook = pl_mpv_user_shader_parse(core->gpu, shader.start, shader.len);
+
+    MP_TARRAY_APPEND(core, core->user_hooks, core->num_user_hooks, (struct user_hook) {
+        .path = talloc_strdup(core, path),
+        .hook = hook,
+    });
+
+    return hook;
 }
 
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
