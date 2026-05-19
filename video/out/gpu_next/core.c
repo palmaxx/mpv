@@ -91,6 +91,38 @@ pl_queue gpu_next_core_queue(struct gpu_next_core *core)
     return core->queue;
 }
 
+bool gpu_next_core_render_mix(struct gpu_next_core *core,
+                              const struct pl_frame_mix *mix,
+                              struct pl_frame *target,
+                              const struct pl_render_params *params)
+{
+    if (!pl_render_image_mix(core->rr, mix, target, params))
+        return false;
+
+    // mpv calls pl_frames_infer_mix purely for its side effects: it updates
+    // the renderer's internal HDR-metadata state (queried afterwards via
+    // gpu_next_core_get_hdr_metadata) and adjusts target.color/repr, which
+    // the caller reads back. The inferred reference frame itself is unused,
+    // matching mainline.
+    struct pl_frame ref_frame;
+    pl_frames_infer_mix(core->rr, mix, target, &ref_frame);
+    return true;
+}
+
+bool gpu_next_core_render_image(struct gpu_next_core *core,
+                                const struct pl_frame *image,
+                                const struct pl_frame *target,
+                                const struct pl_render_params *params)
+{
+    return pl_render_image(core->rr, image, target, params);
+}
+
+bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
+                                    struct pl_hdr_metadata *metadata)
+{
+    return pl_renderer_get_hdr_metadata(core->rr, metadata);
+}
+
 void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 {
     struct gpu_next_core *core = *core_ptr;

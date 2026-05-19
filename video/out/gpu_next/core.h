@@ -58,6 +58,34 @@ pl_renderer gpu_next_core_renderer(struct gpu_next_core *core);
 // first in gpu_next_core_destroy(); see the contract there.
 pl_queue gpu_next_core_queue(struct gpu_next_core *core);
 
+// Render a frame mix into target (the windowed VO's draw_frame path).
+// Swapchain-free: the front-end acquires target, drives the colorspace
+// hint, and presents the result; the same entry point will back the
+// libmpv render API, which has no pl_swapchain. On success the renderer's
+// internal HDR-metadata state and target (color/repr/rotation) have been
+// updated in place by the post-render inference (mirroring mainline's
+// unused pl_frames_infer_mix follow-up), so the caller may then read
+// target back and call gpu_next_core_get_hdr_metadata(). Returns false on
+// libplacebo render failure, in which case the caller clears target
+// itself and the inference is skipped (as in mainline).
+bool gpu_next_core_render_mix(struct gpu_next_core *core,
+                              const struct pl_frame_mix *mix,
+                              struct pl_frame *target,
+                              const struct pl_render_params *params);
+
+// Render a single image into target (the screenshot path). Returns false
+// on libplacebo render failure.
+bool gpu_next_core_render_image(struct gpu_next_core *core,
+                                const struct pl_frame *image,
+                                const struct pl_frame *target,
+                                const struct pl_render_params *params);
+
+// Mirror pl_renderer_get_hdr_metadata(): fetch the renderer's current
+// peak-detection HDR metadata into *metadata. Returns false when it is
+// unavailable (non-HDR source or peak detection disabled).
+bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
+                                    struct pl_hdr_metadata *metadata);
+
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
 // if it is not a direct-rendering allocation (frame-upload fast path).
 pl_buf gpu_next_core_get_dr_buf(struct gpu_next_core *core, const uint8_t *ptr);
