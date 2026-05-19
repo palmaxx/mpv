@@ -75,10 +75,6 @@ struct osd_state {
     struct pl_overlay overlays[MAX_OSD_PARTS];
 };
 
-struct scaler_params {
-    struct pl_filter_config config;
-};
-
 struct user_hook {
     char *path;
     const struct pl_hook *hook;
@@ -148,7 +144,6 @@ struct priv {
     struct gl_next_opts *next_opts;
     struct cache shader_cache, icc_cache;
     struct mp_csp_equalizer_state *video_eq;
-    struct scaler_params scalers[SCALER_COUNT];
     const struct pl_hook **hooks; // storage for `params.hooks`
     enum pl_color_levels output_levels;
 
@@ -1949,7 +1944,7 @@ static int preinit(struct vo *vo)
     vo->hwdec_devs = hwdec_devices_create();
     hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
     ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
-    p->core = gpu_next_core_create(p->gpu);
+    p->core = gpu_next_core_create(p->gpu, p->log);
 
     if (gl_opts->shader_cache)
         cache_init(vo, &p->shader_cache, 10 << 20, gl_opts->shader_cache_dir);
@@ -1970,95 +1965,6 @@ static int preinit(struct vo *vo)
 err_out:
     uninit(vo);
     return -1;
-}
-
-static const struct pl_filter_config *map_scaler(struct priv *p,
-                                                 enum scaler_unit unit)
-{
-    const struct pl_filter_preset fixed_scalers[] = {
-        { "bilinear",       &pl_filter_bilinear },
-        { "bicubic_fast",   &pl_filter_bicubic },
-        { "nearest",        &pl_filter_nearest },
-        { "oversample",     &pl_filter_oversample },
-        {0},
-    };
-
-    const struct pl_filter_preset fixed_frame_mixers[] = {
-        { "linear",         &pl_filter_bilinear },
-        { "oversample",     &pl_filter_oversample },
-        {0},
-    };
-
-    const struct pl_filter_preset *fixed_presets =
-        unit == SCALER_TSCALE ? fixed_frame_mixers : fixed_scalers;
-
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    const struct scaler_config *cfg = &opts->scaler[unit];
-    struct scaler_config tmp;
-    if (cfg->kernel.function == SCALER_INHERIT) {
-        tmp = *cfg;
-        scaler_conf_merge(&tmp, &opts->scaler[SCALER_SCALE], unit);
-        cfg = &tmp;
-    }
-
-    const char *kernel_name = m_opt_choice_str(cfg->kernel.functions,
-                                               cfg->kernel.function);
-
-    for (int i = 0; fixed_presets[i].name; i++) {
-        if (strcmp(kernel_name, fixed_presets[i].name) == 0)
-            return fixed_presets[i].filter;
-    }
-
-    // Attempt loading filter preset first, fall back to raw filter function
-    struct scaler_params *par = &p->scalers[unit];
-    const struct pl_filter_preset *preset;
-    const struct pl_filter_function_preset *fpreset;
-    if ((preset = pl_find_filter_preset(kernel_name))) {
-        par->config = *preset->filter;
-    } else if ((fpreset = pl_find_filter_function_preset(kernel_name))) {
-        par->config = (struct pl_filter_config) {
-            .kernel = fpreset->function,
-            .params[0] = fpreset->function->params[0],
-            .params[1] = fpreset->function->params[1],
-        };
-    } else {
-        MP_ERR(p, "Failed mapping filter function '%s', no libplacebo analog?\n",
-               kernel_name);
-        return &pl_filter_bilinear;
-    }
-
-    const struct pl_filter_function_preset *wpreset;
-    if ((wpreset = pl_find_filter_function_preset(
-             m_opt_choice_str(cfg->window.functions, cfg->window.function)))) {
-        par->config.window = wpreset->function;
-        par->config.wparams[0] = wpreset->function->params[0];
-        par->config.wparams[1] = wpreset->function->params[1];
-    }
-
-    for (int i = 0; i < 2; i++) {
-        if (!isnan(cfg->kernel.params[i]))
-            par->config.params[i] = cfg->kernel.params[i];
-        if (!isnan(cfg->window.params[i]))
-            par->config.wparams[i] = cfg->window.params[i];
-    }
-
-    par->config.clamp = cfg->clamp;
-    if (cfg->antiring > 0.0)
-        par->config.antiring = cfg->antiring;
-    if (cfg->kernel.blur > 0.0)
-        par->config.blur = cfg->kernel.blur;
-    if (cfg->kernel.taper > 0.0)
-        par->config.taper = cfg->kernel.taper;
-    if (cfg->radius > 0.0) {
-        if (par->config.kernel->resizable) {
-            par->config.radius = cfg->radius;
-        } else {
-            MP_WARN(p, "Filter radius specified but filter '%s' is not "
-                    "resizable, ignoring\n", kernel_name);
-        }
-    }
-
-    return &par->config;
 }
 
 static const struct pl_hook *load_hook(struct priv *p, const char *path)
@@ -2279,10 +2185,11 @@ static void update_render_options(struct vo *vo)
     pars->params.correct_subpixel_offsets = !opts->scaler_resizes_only;
 
     // Map scaler options as best we can
-    pars->params.upscaler = map_scaler(p, SCALER_SCALE);
-    pars->params.downscaler = map_scaler(p, SCALER_DSCALE);
-    pars->params.plane_upscaler = map_scaler(p, SCALER_CSCALE);
-    pars->params.frame_mixer = opts->interpolation ? map_scaler(p, SCALER_TSCALE) : NULL;
+    pars->params.upscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_SCALE);
+    pars->params.downscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_DSCALE);
+    pars->params.plane_upscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_CSCALE);
+    pars->params.frame_mixer = opts->interpolation ?
+        gpu_next_core_map_scaler(p->core, opts, SCALER_TSCALE) : NULL;
 
     // Request as many frames as required from the decoder, depending on the
     // speed VPS/FPS ratio libplacebo may need more frames. Request frames up to

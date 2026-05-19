@@ -26,9 +26,10 @@
 #include <libplacebo/utils/upload.h>
 
 #include "video/img_format.h"
+#include "video/out/gpu/video.h"
 
 struct mp_image;
-struct gl_video_opts;
+struct mp_log;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
@@ -37,7 +38,7 @@ struct gl_video_opts;
 // later, individually golden-frame-gated steps.
 struct gpu_next_core;
 
-struct gpu_next_core *gpu_next_core_create(pl_gpu gpu);
+struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log);
 void gpu_next_core_destroy(struct gpu_next_core **core);
 
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
@@ -60,6 +61,13 @@ int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
 
 // Whether the GPU can directly upload software frames of this mpv format.
 bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
+
+// Map the mpv scaler option for the given unit to a libplacebo filter
+// config (caching the resolved config in the core), as vo_gpu maps its
+// scalers. Backs the renderer's up/down/plane scalers and frame mixer.
+const struct pl_filter_config *gpu_next_core_map_scaler(
+    struct gpu_next_core *core, const struct gl_video_opts *opts,
+    enum scaler_unit unit);
 
 // Apply the target-contrast option to a colorspace (pure; no swapchain).
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
