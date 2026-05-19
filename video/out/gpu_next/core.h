@@ -24,6 +24,7 @@
 #include <libplacebo/log.h>
 #include <libplacebo/options.h>
 #include <libplacebo/shaders/icc.h>
+#include <libplacebo/utils/frame_queue.h>
 #include <libplacebo/utils/upload.h>
 
 #include "video/img_format.h"
@@ -52,6 +53,10 @@ pl_options gpu_next_core_options(struct gpu_next_core *core);
 
 // The libplacebo renderer owned by the core.
 pl_renderer gpu_next_core_renderer(struct gpu_next_core *core);
+
+// The libplacebo frame queue owned by the core. The core destroys it
+// first in gpu_next_core_destroy(); see the contract there.
+pl_queue gpu_next_core_queue(struct gpu_next_core *core);
 
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
 // if it is not a direct-rendering allocation (frame-upload fast path).
