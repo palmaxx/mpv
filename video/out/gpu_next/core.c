@@ -17,6 +17,10 @@
 
 #include "core.h"
 
+#include <math.h>
+
+#include <libplacebo/filters.h>
+
 #include "common/common.h"
 #include "common/msg.h"
 #include "osdep/threads.h"
@@ -25,19 +29,27 @@
 #include "video/out/gpu/video.h"
 #include "video/out/vo.h"
 
+struct scaler_params {
+    struct pl_filter_config config;
+};
+
 struct gpu_next_core {
     pl_gpu gpu;
+    struct mp_log *log;
 
     // Allocated DR buffers
     mp_mutex dr_lock;
     pl_buf *dr_buffers;
     int num_dr_buffers;
+
+    struct scaler_params scalers[SCALER_COUNT];
 };
 
-struct gpu_next_core *gpu_next_core_create(pl_gpu gpu)
+struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log)
 {
     struct gpu_next_core *core = talloc_zero(NULL, struct gpu_next_core);
     core->gpu = gpu;
+    core->log = log;
     mp_mutex_init(&core->dr_lock);
     return core;
 }
@@ -236,6 +248,95 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint)
     }
 
     return true;
+}
+
+const struct pl_filter_config *gpu_next_core_map_scaler(
+    struct gpu_next_core *core, const struct gl_video_opts *opts,
+    enum scaler_unit unit)
+{
+    const struct pl_filter_preset fixed_scalers[] = {
+        { "bilinear",       &pl_filter_bilinear },
+        { "bicubic_fast",   &pl_filter_bicubic },
+        { "nearest",        &pl_filter_nearest },
+        { "oversample",     &pl_filter_oversample },
+        {0},
+    };
+
+    const struct pl_filter_preset fixed_frame_mixers[] = {
+        { "linear",         &pl_filter_bilinear },
+        { "oversample",     &pl_filter_oversample },
+        {0},
+    };
+
+    const struct pl_filter_preset *fixed_presets =
+        unit == SCALER_TSCALE ? fixed_frame_mixers : fixed_scalers;
+
+    const struct scaler_config *cfg = &opts->scaler[unit];
+    struct scaler_config tmp;
+    if (cfg->kernel.function == SCALER_INHERIT) {
+        tmp = *cfg;
+        scaler_conf_merge(&tmp, &opts->scaler[SCALER_SCALE], unit);
+        cfg = &tmp;
+    }
+
+    const char *kernel_name = m_opt_choice_str(cfg->kernel.functions,
+                                               cfg->kernel.function);
+
+    for (int i = 0; fixed_presets[i].name; i++) {
+        if (strcmp(kernel_name, fixed_presets[i].name) == 0)
+            return fixed_presets[i].filter;
+    }
+
+    // Attempt loading filter preset first, fall back to raw filter function
+    struct scaler_params *par = &core->scalers[unit];
+    const struct pl_filter_preset *preset;
+    const struct pl_filter_function_preset *fpreset;
+    if ((preset = pl_find_filter_preset(kernel_name))) {
+        par->config = *preset->filter;
+    } else if ((fpreset = pl_find_filter_function_preset(kernel_name))) {
+        par->config = (struct pl_filter_config) {
+            .kernel = fpreset->function,
+            .params[0] = fpreset->function->params[0],
+            .params[1] = fpreset->function->params[1],
+        };
+    } else {
+        MP_ERR(core, "Failed mapping filter function '%s', no libplacebo analog?\n",
+               kernel_name);
+        return &pl_filter_bilinear;
+    }
+
+    const struct pl_filter_function_preset *wpreset;
+    if ((wpreset = pl_find_filter_function_preset(
+             m_opt_choice_str(cfg->window.functions, cfg->window.function)))) {
+        par->config.window = wpreset->function;
+        par->config.wparams[0] = wpreset->function->params[0];
+        par->config.wparams[1] = wpreset->function->params[1];
+    }
+
+    for (int i = 0; i < 2; i++) {
+        if (!isnan(cfg->kernel.params[i]))
+            par->config.params[i] = cfg->kernel.params[i];
+        if (!isnan(cfg->window.params[i]))
+            par->config.wparams[i] = cfg->window.params[i];
+    }
+
+    par->config.clamp = cfg->clamp;
+    if (cfg->antiring > 0.0)
+        par->config.antiring = cfg->antiring;
+    if (cfg->kernel.blur > 0.0)
+        par->config.blur = cfg->kernel.blur;
+    if (cfg->kernel.taper > 0.0)
+        par->config.taper = cfg->kernel.taper;
+    if (cfg->radius > 0.0) {
+        if (par->config.kernel->resizable) {
+            par->config.radius = cfg->radius;
+        } else {
+            MP_WARN(core, "Filter radius specified but filter '%s' is not "
+                    "resizable, ignoring\n", kernel_name);
+        }
+    }
+
+    return &par->config;
 }
 
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
