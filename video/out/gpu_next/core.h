@@ -22,6 +22,7 @@
 #include <libplacebo/colorspace.h>
 #include <libplacebo/gpu.h>
 #include <libplacebo/log.h>
+#include <libplacebo/options.h>
 #include <libplacebo/shaders/icc.h>
 #include <libplacebo/utils/upload.h>
 
@@ -35,13 +36,19 @@ struct pl_hook;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
-// how gl_video is shared by vo_gpu.c and libmpv_gpu.c. It currently owns
-// only the direct-rendering buffer pool; the renderer is migrated here in
-// later, individually golden-frame-gated steps.
+// how gl_video is shared by vo_gpu.c and libmpv_gpu.c. The renderer
+// itself is migrated here in later, individually golden-frame-gated
+// steps; it currently owns the direct-rendering pool, the resolved
+// scaler/user-shader state and the libplacebo options object.
 struct gpu_next_core;
 
-struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log);
+struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
+                                           pl_log pllog);
 void gpu_next_core_destroy(struct gpu_next_core **core);
+
+// The libplacebo options/render-params object owned by the core. The
+// front-end populates pars->params before driving the render.
+pl_options gpu_next_core_options(struct gpu_next_core *core);
 
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
 // if it is not a direct-rendering allocation (frame-upload fast path).

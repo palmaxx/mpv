@@ -135,7 +135,6 @@ struct priv {
     bool frame_pending;
     bool paused;
 
-    pl_options pars;
     struct m_config_cache *opts_cache;
     struct m_config_cache *next_opts_cache;
     struct gl_next_opts *next_opts;
@@ -831,7 +830,7 @@ static void info_callback(void *priv, const struct pl_render_info *info)
 static void update_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    pl_options pars = p->pars;
+    pl_options pars = gpu_next_core_options(p->core);
     bool changed = m_config_cache_update(p->opts_cache);
     changed = m_config_cache_update(p->next_opts_cache) || changed;
     if (changed)
@@ -992,7 +991,7 @@ static void update_hook_opts_dynamic(struct priv *p, const struct pl_hook *hook,
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
-    pl_options pars = p->pars;
+    pl_options pars = gpu_next_core_options(p->core);
     pl_gpu gpu = p->gpu;
     update_options(vo);
 
@@ -1441,7 +1440,7 @@ static bool update_auto_profile(struct priv *p, int *events)
 static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
 {
     struct priv *p = vo->priv;
-    pl_options pars = p->pars;
+    pl_options pars = gpu_next_core_options(p->core);
     pl_gpu gpu = p->gpu;
     pl_tex fbo = NULL;
     args->res = NULL;
@@ -2030,8 +2029,6 @@ static void uninit(struct vo *vo)
         pl_shader_info_deref(&p->perf_redraw.info[i].shader);
     }
 
-    pl_options_free(&p->pars);
-
     p->ra_ctx = NULL;
     p->pllog = NULL;
     p->gpu = NULL;
@@ -2076,7 +2073,7 @@ static int preinit(struct vo *vo)
     vo->hwdec_devs = hwdec_devices_create();
     hwdec_devices_set_loader(vo->hwdec_devs, load_hwdec_api, vo);
     ra_hwdec_ctx_init(&p->hwdec_ctx, vo->hwdec_devs, gl_opts->hwdec_interop, false);
-    p->core = gpu_next_core_create(p->gpu, p->log);
+    p->core = gpu_next_core_create(p->gpu, p->log, p->pllog);
 
     if (gl_opts->shader_cache)
         cache_init(vo, &p->shader_cache, 10 << 20, gl_opts->shader_cache_dir);
@@ -2090,7 +2087,6 @@ static int preinit(struct vo *vo)
     p->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(p->gpu, "bgra8");
     p->osd_sync = 1;
 
-    p->pars = pl_options_alloc(p->pllog);
     update_render_options(vo);
     return 0;
 
@@ -2258,7 +2254,7 @@ static void update_hook_opts(struct priv *p, char **opts, const char *shaderpath
 static void update_render_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    pl_options pars = p->pars;
+    pl_options pars = gpu_next_core_options(p->core);
     const struct gl_video_opts *opts = p->opts_cache->opts;
     pars->params.background_color[0] = opts->background_color.r / 255.0;
     pars->params.background_color[1] = opts->background_color.g / 255.0;
