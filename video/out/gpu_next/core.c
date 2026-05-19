@@ -43,7 +43,10 @@ struct user_hook {
 
 struct gpu_next_core {
     pl_gpu gpu;
+    pl_log pllog;
     struct mp_log *log;
+
+    pl_options pars;
 
     // Allocated DR buffers
     mp_mutex dr_lock;
@@ -57,13 +60,21 @@ struct gpu_next_core {
     int num_user_hooks;
 };
 
-struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log)
+struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
+                                           pl_log pllog)
 {
     struct gpu_next_core *core = talloc_zero(NULL, struct gpu_next_core);
     core->gpu = gpu;
+    core->pllog = pllog;
     core->log = log;
+    core->pars = pl_options_alloc(pllog);
     mp_mutex_init(&core->dr_lock);
     return core;
+}
+
+pl_options gpu_next_core_options(struct gpu_next_core *core)
+{
+    return core->pars;
 }
 
 void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
@@ -77,6 +88,8 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 
     mp_assert(core->num_dr_buffers == 0);
     mp_mutex_destroy(&core->dr_lock);
+
+    pl_options_free(&core->pars);
 
     talloc_free(core);
     *core_ptr = NULL;
