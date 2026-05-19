@@ -23,6 +23,9 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/log.h>
 #include <libplacebo/shaders/icc.h>
+#include <libplacebo/utils/upload.h>
+
+#include "video/img_format.h"
 
 struct mp_image;
 struct gl_video_opts;
@@ -47,6 +50,16 @@ pl_buf gpu_next_core_get_dr_buf(struct gpu_next_core *core, const uint8_t *ptr);
 struct mp_image *gpu_next_core_get_image(struct gpu_next_core *core,
                                          int imgfmt, int w, int h,
                                          int stride_align, int flags);
+
+// Derive libplacebo plane upload descriptors (and, optionally, the shared
+// bit encoding) from an mpv image format. Pure format math; returns the
+// number of planes, or 0 if the format cannot be uploaded directly.
+int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
+                                         struct pl_bit_encoding *out_bits,
+                                         enum mp_imgfmt imgfmt, bool use_uint);
+
+// Whether the GPU can directly upload software frames of this mpv format.
+bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 
 // Apply the target-contrast option to a colorspace (pure; no swapchain).
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,

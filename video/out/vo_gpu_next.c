@@ -405,99 +405,6 @@ struct frame_priv {
     struct pl_frame el_frame;
 };
 
-static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
-                                  struct pl_bit_encoding *out_bits,
-                                  enum mp_imgfmt imgfmt, bool use_uint)
-{
-    struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(imgfmt);
-    if (!desc.num_planes || !(desc.flags & MP_IMGFLAG_HAS_COMPS))
-        return 0;
-
-    if (desc.flags & MP_IMGFLAG_HWACCEL)
-        return 0; // HW-accelerated frames need to be mapped differently
-
-    if (!(desc.flags & MP_IMGFLAG_NE))
-        return 0; // GPU endianness follows the host's
-
-    if (desc.flags & MP_IMGFLAG_PAL)
-        return 0; // Palette formats (currently) not supported in libplacebo
-
-    if ((desc.flags & MP_IMGFLAG_TYPE_FLOAT) && (desc.flags & MP_IMGFLAG_YUV))
-        return 0; // Floating-point YUV (currently) unsupported
-
-    bool has_bits = false;
-    bool any_padded = false;
-
-    for (int p = 0; p < desc.num_planes; p++) {
-        struct pl_plane_data *data = &out_data[p];
-        struct mp_imgfmt_comp_desc sorted[MP_NUM_COMPONENTS];
-        int num_comps = 0;
-        if (desc.bpp[p] % 8)
-            return 0; // Pixel size is not byte-aligned
-
-        for (int c = 0; c < mp_imgfmt_desc_get_num_comps(&desc); c++) {
-            if (desc.comps[c].plane != p)
-                continue;
-
-            data->component_map[num_comps] = c;
-            sorted[num_comps] = desc.comps[c];
-            num_comps++;
-
-            // Sort components by offset order, while keeping track of the
-            // semantic mapping in `data->component_map`
-            for (int i = num_comps - 1; i > 0; i--) {
-                if (sorted[i].offset >= sorted[i - 1].offset)
-                    break;
-                MPSWAP(struct mp_imgfmt_comp_desc, sorted[i], sorted[i - 1]);
-                MPSWAP(int, data->component_map[i], data->component_map[i - 1]);
-            }
-        }
-
-        uint64_t total_bits = 0;
-
-        // Fill in the pl_plane_data fields for each component
-        memset(data->component_size, 0, sizeof(data->component_size));
-        for (int c = 0; c < num_comps; c++) {
-            data->component_size[c] = sorted[c].size;
-            data->component_pad[c] = sorted[c].offset - total_bits;
-            total_bits += data->component_pad[c] + data->component_size[c];
-            any_padded |= sorted[c].pad;
-
-            // Ignore bit encoding of alpha channel
-            if (!out_bits || data->component_map[c] == PL_CHANNEL_A)
-                continue;
-
-            struct pl_bit_encoding bits = {
-                .sample_depth = data->component_size[c],
-                .color_depth = sorted[c].size - abs(sorted[c].pad),
-                .bit_shift = MPMAX(sorted[c].pad, 0),
-            };
-
-            if (!has_bits) {
-                *out_bits = bits;
-                has_bits = true;
-            } else {
-                if (!pl_bit_encoding_equal(out_bits, &bits)) {
-                    // Bit encoding differs between components/planes,
-                    // cannot handle this
-                    *out_bits = (struct pl_bit_encoding) {0};
-                    out_bits = NULL;
-                }
-            }
-        }
-
-        data->pixel_stride = desc.bpp[p] / 8;
-        data->type = (desc.flags & MP_IMGFLAG_TYPE_FLOAT)
-                            ? PL_FMT_FLOAT
-                            : (use_uint ? PL_FMT_UINT : PL_FMT_UNORM);
-    }
-
-    if (any_padded && !out_bits)
-        return 0; // can't handle padded components without `pl_bit_encoding`
-
-    return desc.num_planes;
-}
-
 static bool hwdec_reconfig(struct priv *p, struct ra_hwdec_mapper **mapper,
                            struct timer_pool **timer, struct ra_hwdec *hwdec,
                            const struct mp_image_params *par)
@@ -677,22 +584,6 @@ static void hwdec_release_el(pl_gpu gpu, struct pl_frame *frame)
 }
 #endif
 
-static bool format_supported(struct vo *vo, int format, bool use_uint)
-{
-    struct priv *p = vo->priv;
-    struct pl_bit_encoding bits;
-    struct pl_plane_data data[4] = {0};
-    int planes = plane_data_from_imgfmt(data, &bits, format, use_uint);
-    if (!planes)
-        return false;
-
-    for (int i = 0; i < planes; i++) {
-        if (!pl_plane_find_fmt(p->gpu, NULL, &data[i]))
-            return false;
-    }
-
-    return true;
-}
 
 // Effective reference white luminance in nits to assume for SDR content.
 static float get_ref_luma(struct priv *p)
@@ -728,8 +619,8 @@ static bool upload_planes_sw(struct vo *vo, pl_gpu gpu, struct mp_image *mpi,
 
     // At this point, we know that the format is supported, query_format()
     // makes sure of that. Just check if we should use UINT as a fallback.
-    bool use_uint = !format_supported(vo, mpi->imgfmt, false);
-    int planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt,
+    bool use_uint = !gpu_next_core_format_supported(gpu, mpi->imgfmt, false);
+    int planes = gpu_next_core_plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt,
                                         use_uint);
     if (!planes)
         return false;
@@ -1479,9 +1370,9 @@ static int query_format(struct vo *vo, int format)
     if (ra_hwdec_get(&p->hwdec_ctx, format))
         return true;
 
-    bool supported = format_supported(vo, format, false);
+    bool supported = gpu_next_core_format_supported(p->gpu, format, false);
     if (!supported)
-        supported = format_supported(vo, format, true);
+        supported = gpu_next_core_format_supported(p->gpu, format, true);
 
     return supported;
 }
