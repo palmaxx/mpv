@@ -48,6 +48,7 @@ struct gpu_next_core {
 
     pl_options pars;
     pl_renderer rr;
+    pl_queue queue;
 
     // Allocated DR buffers
     mp_mutex dr_lock;
@@ -70,6 +71,7 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
     core->log = log;
     core->pars = pl_options_alloc(pllog);
     core->rr = pl_renderer_create(pllog, gpu);
+    core->queue = pl_queue_create(gpu);
     mp_mutex_init(&core->dr_lock);
     return core;
 }
@@ -84,11 +86,22 @@ pl_renderer gpu_next_core_renderer(struct gpu_next_core *core)
     return core->rr;
 }
 
+pl_queue gpu_next_core_queue(struct gpu_next_core *core)
+{
+    return core->queue;
+}
+
 void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 {
     struct gpu_next_core *core = *core_ptr;
     if (!core)
         return;
+
+    // Release any in-flight frames first: their unmap returns DR buffers
+    // (so the assert below holds) and unmaps hwdec textures. The front-end
+    // must call gpu_next_core_destroy() before tearing down its hwdec
+    // interop so those unmaps stay valid.
+    pl_queue_destroy(&core->queue);
 
     for (int i = 0; i < core->num_user_hooks; i++)
         pl_mpv_user_shader_destroy(&core->user_hooks[i].hook);

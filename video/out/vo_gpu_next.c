@@ -115,7 +115,6 @@ struct priv {
 
     pl_log pllog;
     pl_gpu gpu;
-    pl_queue queue;
     pl_swapchain sw;
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
     pl_tex *sub_tex;
@@ -1027,7 +1026,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     // frame in vo_frame anyway.
     struct pl_source_frame vpts;
     if (frame->current && !p->want_reset) {
-        if (pl_queue_peek(p->queue, 0, &vpts) &&
+        if (pl_queue_peek(gpu_next_core_queue(p->core), 0, &vpts) &&
             frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
         {
             MP_VERBOSE(vo, "Forcing queue refill, PTS(%f + %f | %f) < VPTS(%f)\n",
@@ -1042,7 +1041,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         int id = frame->frame_id + n;
 
         if (p->want_reset) {
-            pl_queue_reset(p->queue);
+            pl_queue_reset(gpu_next_core_queue(p->core));
             p->last_pts = 0.0;
             p->last_id = 0;
             p->want_reset = false;
@@ -1062,7 +1061,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         mpi->priv = fp;
         fp->vo = vo;
 
-        pl_queue_push(p->queue, &(struct pl_source_frame) {
+        pl_queue_push(gpu_next_core_queue(p->core), &(struct pl_source_frame) {
             .pts = mpi->pts,
             .duration = can_interpolate ? frame->approx_duration : 0,
             .frame_data = mpi,
@@ -1114,7 +1113,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                 .vsync_duration = can_interpolate ? frame->ideal_frame_vsync_duration : 0,
                 .drift_compensation = 0,
             );
-            pl_queue_update(p->queue, NULL, &qparams);
+            pl_queue_update(gpu_next_core_queue(p->core), NULL, &qparams);
         }
         return VO_FALSE;
     }
@@ -1203,7 +1202,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // pl_queue will have this frame, unless it's after a reset event. In
         // this case, start from the first available frame.
         struct pl_source_frame first;
-        if (pl_queue_peek(p->queue, 0, &first) && qparams.pts < first.pts) {
+        if (pl_queue_peek(gpu_next_core_queue(p->core), 0, &first) && qparams.pts < first.pts) {
             if (first.pts != frame->current->pts)
                 MP_VERBOSE(vo, "Current PTS(%f) != VPTS(%f)\n", frame->current->pts, first.pts);
             MP_VERBOSE(vo, "Clamping first frame PTS from %f to %f\n", qparams.pts, first.pts);
@@ -1211,7 +1210,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         }
         p->last_pts = qparams.pts;
 
-        switch (pl_queue_update(p->queue, &mix, &qparams)) {
+        switch (pl_queue_update(gpu_next_core_queue(p->core), &mix, &qparams)) {
         case PL_QUEUE_ERR:
             MP_ERR(vo, "Failed updating frames!\n");
             goto done;
@@ -1465,7 +1464,7 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
         .pts = p->last_pts,
         .drift_compensation = 0,
     );
-    status = pl_queue_update(p->queue, &mix, &qparams);
+    status = pl_queue_update(gpu_next_core_queue(p->core), &mix, &qparams);
     mp_assert(status != PL_QUEUE_EOF);
     if (status == PL_QUEUE_ERR) {
         MP_ERR(vo, "Unknown error occurred while trying to take screenshot!\n");
@@ -1993,7 +1992,10 @@ static void uninit(struct vo *vo)
     if (p->gpu)
         pl_gpu_finish(p->gpu);
 
-    pl_queue_destroy(&p->queue); // destroy this first
+    // The core owns the frame queue and destroys it first internally, so
+    // this must run before the hwdec teardown below (queued frames unmap
+    // hwdec textures on release).
+    gpu_next_core_destroy(&p->core);
     for (int i = 0; i < MP_ARRAY_SIZE(p->osd_state.entries); i++)
         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
     for (int i = 0; i < p->num_sub_tex; i++)
@@ -2010,8 +2012,6 @@ static void uninit(struct vo *vo)
         hwdec_devices_set_loader(vo->hwdec_devs, NULL, NULL);
         hwdec_devices_destroy(vo->hwdec_devs);
     }
-
-    gpu_next_core_destroy(&p->core);
 
     cache_uninit(p, &p->shader_cache);
     cache_uninit(p, &p->icc_cache);
@@ -2079,7 +2079,6 @@ static int preinit(struct vo *vo)
 
     pl_gpu_set_cache(p->gpu, p->shader_cache.cache);
     p->core = gpu_next_core_create(p->gpu, p->log, p->pllog);
-    p->queue = pl_queue_create(p->gpu);
     p->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(p->gpu, "r8");
     p->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(p->gpu, "bgra8");
     p->osd_sync = 1;
