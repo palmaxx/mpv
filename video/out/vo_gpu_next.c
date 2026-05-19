@@ -75,11 +75,6 @@ struct osd_state {
     struct pl_overlay overlays[MAX_OSD_PARTS];
 };
 
-struct user_hook {
-    char *path;
-    const struct pl_hook *hook;
-};
-
 struct user_lut {
     char *opt;
     char *path;
@@ -152,10 +147,6 @@ struct priv {
     struct pl_icc_params icc_params;
     char *icc_path;
     pl_icc_object icc_profile;
-
-    // Cached shaders, preserved across options updates
-    struct user_hook *user_hooks;
-    int num_user_hooks;
 
     // Performance data of last frame
     struct frame_info perf_fresh;
@@ -2009,8 +2000,6 @@ static void uninit(struct vo *vo)
         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
     for (int i = 0; i < p->num_sub_tex; i++)
         pl_tex_destroy(p->gpu, &p->sub_tex[i]);
-    for (int i = 0; i < p->num_user_hooks; i++)
-        pl_mpv_user_shader_destroy(&p->user_hooks[i].hook);
 
     timer_pool_destroy(p->sw_upload_timer);
 
@@ -2108,32 +2097,6 @@ static int preinit(struct vo *vo)
 err_out:
     uninit(vo);
     return -1;
-}
-
-static const struct pl_hook *load_hook(struct priv *p, const char *path)
-{
-    if (!path || !path[0])
-        return NULL;
-
-    for (int i = 0; i < p->num_user_hooks; i++) {
-        if (strcmp(p->user_hooks[i].path, path) == 0)
-            return p->user_hooks[i].hook;
-    }
-
-    char *fname = mp_get_user_path(NULL, p->global, path);
-    bstr shader = stream_read_file(fname, p, p->global, 1000000000); // 1GB
-    talloc_free(fname);
-
-    const struct pl_hook *hook = NULL;
-    if (shader.len)
-        hook = pl_mpv_user_shader_parse(p->gpu, shader.start, shader.len);
-
-    MP_TARRAY_APPEND(p, p->user_hooks, p->num_user_hooks, (struct user_hook) {
-        .path = talloc_strdup(p, path),
-        .hook = hook,
-    });
-
-    return hook;
 }
 
 static void update_icc_opts(struct priv *p, const struct mp_icc_opts *opts)
@@ -2430,7 +2393,7 @@ AV_NOWARN_DEPRECATED(
     pars->params.num_hooks = 0;
     const struct pl_hook *hook;
     for (int i = 0; opts->user_shaders && opts->user_shaders[i]; i++) {
-        if ((hook = load_hook(p, opts->user_shaders[i]))) {
+        if ((hook = gpu_next_core_load_hook(p->core, p->global, opts->user_shaders[i]))) {
             MP_TARRAY_APPEND(p, p->hooks, pars->params.num_hooks, hook);
             update_hook_opts(p, opts->user_shader_opts, opts->user_shaders[i], hook);
         }
