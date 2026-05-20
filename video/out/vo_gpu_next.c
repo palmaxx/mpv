@@ -594,8 +594,6 @@ static bool use_ref_luma(const struct pl_color_space *csp, const struct pl_color
     return false;
 }
 
-static bool upload_planes_sw(struct vo *vo, pl_gpu gpu, struct mp_image *mpi,
-                             struct pl_frame *frame, pl_tex tex[4])
 {
     struct priv *p = vo->priv;
     struct pl_plane_data data[4] = {0};
@@ -710,15 +708,13 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
 
         stats_time_start(p->stats, "swdec-upload");
         timer_pool_start(p->sw_upload_timer);
-        bool ok = upload_planes_sw(vo, gpu, mpi, frame, tex);
+        bool ok = gpu_next_core_upload_sw_planes(p->core, mpi, tex, frame);
         timer_pool_stop(p->sw_upload_timer);
+        if (ok)
+            p->sw_upload_perf = timer_pool_measure(p->sw_upload_timer);
         stats_time_end(p->stats, "swdec-upload");
-        if (!ok) {
-            MP_ERR(vo, "Failed uploading frame!\n");
-            talloc_free(mpi);
+        if (!ok)
             return false;
-        }
-        p->sw_upload_perf = timer_pool_measure(p->sw_upload_timer);
     }
 
     // Update chroma location, must be done after initializing planes
@@ -754,7 +750,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
             fp->el_frame.release = hwdec_release_el;
             setup_hwdec_plane_mapping(&fp->el_frame, &desc);
         } else if (el_ok) {
-            el_ok = upload_planes_sw(vo, gpu, el, &fp->el_frame, fp->el_tex);
+            el_ok = gpu_next_core_upload_sw_planes(p->core, el, fp->el_tex, &fp->el_frame);
         }
 
         if (el_ok) {

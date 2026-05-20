@@ -107,6 +107,32 @@ int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
 // Whether the GPU can directly upload software frames of this mpv format.
 bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 
+// Upload the software-decoded planes of `mpi` into the supplied texture
+// slot, using the core's DR-buffer pool for zero-copy when applicable,
+// and fill the corresponding pl_plane / pl_plane_data fields of `frame`.
+// Sets frame->num_planes and frame->repr.bits. Mirrors how vo_gpu's
+// SW-upload is shared between the windowed VO and libmpv_gpu via
+// gl_video; the libmpv render API (no pl_swapchain) will drive the same
+// entry point.
+//
+// Returns false on libplacebo upload failure, in which case mpi and any
+// ref kept for an async upload callback have already been talloc_freed
+// (matching mainline's map_frame failure path); the front-end's outer
+// timer/stats wrapping should be closed and the caller should propagate
+// false back to pl_queue. On success the lifetime contract is the
+// existing one: pl_queue holds the source-frame's mpi ref until unmap,
+// and the additional ref held for the async-callback path is released by
+// libplacebo when it is done with the buffer.
+//
+// The hwdec branch of map_frame and the per-frame frame_priv plumbing
+// (hwdec acquire/release, OSD subs cache, info_callback) stay with the
+// front-end and remain hwdec-rig-deferred — lavapipe cannot honestly
+// verify hwdec.
+bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
+                                    struct mp_image *mpi,
+                                    pl_tex *tex,
+                                    struct pl_frame *frame);
+
 // Map the mpv scaler option for the given unit to a libplacebo filter
 // config (caching the resolved config in the core), as vo_gpu maps its
 // scalers. Backs the renderer's up/down/plane scalers and frame mixer.
