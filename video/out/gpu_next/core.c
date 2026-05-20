@@ -331,6 +331,65 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint)
     return true;
 }
 
+bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
+                                    struct mp_image *mpi,
+                                    pl_tex *tex,
+                                    struct pl_frame *frame)
+{
+    pl_gpu gpu = core->gpu;
+    struct pl_plane_data data[4] = {0};
+    bool use_uint = false;
+
+    // At this point, query_format() has already accepted the format; this
+    // only picks UINT as a fallback when the UNORM path is unsupported.
+    if (!gpu_next_core_format_supported(gpu, mpi->imgfmt, false))
+        use_uint = true;
+
+    frame->num_planes = gpu_next_core_plane_data_from_imgfmt(
+        data, &frame->repr.bits, mpi->imgfmt, use_uint);
+
+    for (int n = 0; n < frame->num_planes; n++) {
+        struct pl_plane *plane = &frame->planes[n];
+        data[n].width = mp_image_plane_w(mpi, n);
+        data[n].height = mp_image_plane_h(mpi, n);
+        if (mpi->stride[n] < 0) {
+            data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
+            data[n].row_stride = -mpi->stride[n];
+            plane->flipped = true;
+        } else {
+            data[n].pixels = mpi->planes[n];
+            data[n].row_stride = mpi->stride[n];
+        }
+
+        pl_buf buf = gpu_next_core_get_dr_buf(core, data[n].pixels);
+        if (buf) {
+            data[n].buf = buf;
+            data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
+            data[n].pixels = NULL;
+        }
+        // Keep the image alive until libplacebo is done reading it.
+        if (gpu->limits.callbacks) {
+            mp_assert(!data[n].callback);
+            data[n].callback = talloc_free;
+            mp_assert(!data[n].priv);
+            data[n].priv = mp_image_new_ref(mpi);
+        }
+
+        if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
+            MP_ERR(core, "Failed uploading frame!\n");
+            talloc_free(data[n].priv);
+            talloc_free(mpi);
+            return false;
+        }
+
+        // Without async callback support, we have to poll...
+        if (!gpu->limits.callbacks && data[n].buf)
+            while (pl_buf_poll(gpu, data[n].buf, UINT64_MAX));
+    }
+
+    return true;
+}
+
 const struct pl_filter_config *gpu_next_core_map_scaler(
     struct gpu_next_core *core, const struct gl_video_opts *opts,
     enum scaler_unit unit)
