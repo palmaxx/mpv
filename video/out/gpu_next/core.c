@@ -658,6 +658,23 @@ const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
     return hook;
 }
 
+void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
+                                            const struct mp_image *mpi)
+{
+    for (int i = 0; i < hook->num_parameters; i++) {
+        double val;
+        const struct pl_hook_par *hp = &hook->parameters[i];
+        if (!gpu_get_auto_param(mpi, bstr0(hp->name), &val))
+            continue;
+
+        switch (hp->type) {
+        case PL_VAR_FLOAT: hp->data->f = val; break;
+        case PL_VAR_SINT:  hp->data->i = lrint(val); break;
+        case PL_VAR_UINT:  hp->data->u = lrint(val); break;
+        }
+    }
+}
+
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
                                          float min_luma)

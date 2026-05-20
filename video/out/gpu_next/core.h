@@ -210,6 +210,13 @@ const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
                                               struct mpv_global *global,
                                               const char *path);
 
+// Update the libplacebo hook's named parameters that have an auto-source
+// (gpu_get_auto_param in video/out/gpu/utils.c -- PTS, chroma_offset_*,
+// HDR fields). The front-end calls this once per draw_frame per hook
+// before pl_render_image_mix. Pure on `hook` + `mpi`, no core state.
+void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
+                                            const struct mp_image *mpi);
+
 // Apply the target-contrast option to a colorspace (pure; no swapchain).
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
