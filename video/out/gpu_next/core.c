@@ -21,6 +21,7 @@
 
 #include <libplacebo/filters.h>
 #include <libplacebo/shaders/custom.h>
+#include <libplacebo/shaders/lut.h>
 
 #include "config.h"
 #include "common/common.h"
@@ -62,6 +63,12 @@ struct gpu_next_hwdec_state {
     struct mp_pass_perf perf;
 };
 
+struct user_lut_cache_entry {
+    char *path;
+    struct pl_custom_lut *lut;
+};
+};
+
 struct gpu_next_core {
     pl_gpu gpu;
     pl_log pllog;
@@ -88,6 +95,12 @@ struct gpu_next_core {
     // Cached shaders, preserved across options updates
     struct user_hook *user_hooks;
     int num_user_hooks;
+
+    // Cached LUTs (one entry per path; pl_lut shared across the
+    // image/lut/target_lut call sites). Cache failures (path -> NULL)
+    // to avoid re-trying a broken file. Freed in gpu_next_core_destroy.
+    struct user_lut_cache_entry *lut_cache;
+    int num_lut_cache;
 };
 
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
@@ -178,6 +191,9 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 
     for (int i = 0; i < core->num_user_hooks; i++)
         pl_mpv_user_shader_destroy(&core->user_hooks[i].hook);
+
+    for (int i = 0; i < core->num_lut_cache; i++)
+        pl_lut_free(&core->lut_cache[i].lut);
 
     mp_assert(core->num_dr_buffers == 0);
     mp_mutex_destroy(&core->dr_lock);
@@ -722,6 +738,43 @@ const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
     });
 
     return hook;
+}
+
+struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
+                                             struct mpv_global *global,
+                                             const char *path)
+{
+    if (!path || !path[0])
+        return NULL;
+
+    for (int i = 0; i < core->num_lut_cache; i++) {
+        if (strcmp(core->lut_cache[i].path, path) == 0)
+            return core->lut_cache[i].lut;
+    }
+
+    char *fname = mp_get_user_path(NULL, global, path);
+    MP_VERBOSE(core, "Loading custom LUT '%s'\n", fname);
+    // 1.5 GiB, matches libplacebo's internal lut cache limit
+    const int lut_max_size = 1536 << 20;
+    struct bstr lutdata = stream_read_file(fname, NULL, global, lut_max_size);
+
+    struct pl_custom_lut *lut = NULL;
+    if (!lutdata.len) {
+        MP_ERR(core, "Failed to read LUT data from %s, make sure it's a valid "
+                     "file and smaller or equal to %d bytes\n", fname, lut_max_size);
+    } else {
+        lut = pl_lut_parse_cube(core->pllog, lutdata.start, lutdata.len);
+    }
+    talloc_free(fname);
+    talloc_free(lutdata.start);
+
+    MP_TARRAY_APPEND(core, core->lut_cache, core->num_lut_cache,
+                     (struct user_lut_cache_entry) {
+        .path = talloc_strdup(core, path),
+        .lut = lut,
+    });
+
+    return lut;
 }
 
 void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
