@@ -2077,13 +2077,10 @@ static void update_render_options(struct vo *vo)
 
     // Request as many frames as required from the decoder, depending on the
     // speed VPS/FPS ratio libplacebo may need more frames. Request frames up to
-    // ratio of 1/2, but only if anti aliasing is enabled.
-    int req_frames = 2;
-    if (pars->params.frame_mixer) {
-        req_frames += ceilf(pars->params.frame_mixer->kernel->radius) *
-                      (pars->params.skip_anti_aliasing ? 1 : 2);
-    }
-    vo_set_queue_params(vo, 0, MPMIN(VO_MAX_REQ_FRAMES, req_frames));
+    // ratio of 1/2, but only if anti aliasing is enabled. Formula owned by
+    // the core so the request stays in sync with the resolved frame mixer.
+    vo_set_queue_params(vo, 0, MPMIN(VO_MAX_REQ_FRAMES,
+                                     gpu_next_core_required_frames(p->core)));
 
     pars->params.deband_params = opts->deband ? &pars->deband_params : NULL;
     pars->deband_params.iterations = opts->deband_opts->iterations;
