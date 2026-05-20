@@ -123,6 +123,11 @@ bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
     return pl_renderer_get_hdr_metadata(core->rr, metadata);
 }
 
+void gpu_next_core_flush_cache(struct gpu_next_core *core)
+{
+    pl_renderer_flush_cache(core->rr);
+}
+
 void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 {
     struct gpu_next_core *core = *core_ptr;

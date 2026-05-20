@@ -1045,7 +1045,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         }
 
         if (p->flush_cache) {
-            pl_renderer_flush_cache(gpu_next_core_renderer(p->core));
+            gpu_next_core_flush_cache(p->core);
             p->flush_cache = false;
         }
 

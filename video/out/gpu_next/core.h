@@ -86,6 +86,13 @@ bool gpu_next_core_render_image(struct gpu_next_core *core,
 bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
                                     struct pl_hdr_metadata *metadata);
 
+// Wrap pl_renderer_flush_cache(): drop renderer state related to peak
+// detection and frame mixing, which the front-end calls on seek (after
+// pl_queue_reset). This was the last raw-renderer use in the windowed
+// VO; the libmpv render backend will use the same entry point as its
+// seek hook.
+void gpu_next_core_flush_cache(struct gpu_next_core *core);
+
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
 // if it is not a direct-rendering allocation (frame-upload fast path).
 pl_buf gpu_next_core_get_dr_buf(struct gpu_next_core *core, const uint8_t *ptr);
