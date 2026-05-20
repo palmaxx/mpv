@@ -1729,10 +1729,8 @@ static void uninit(struct vo *vo)
     cache_uninit(p, &p->shader_cache);
     cache_uninit(p, &p->icc_cache);
 
-    pl_lut_free(&p->next_opts->image_lut.lut);
-    pl_lut_free(&p->next_opts->lut.lut);
-    pl_lut_free(&p->next_opts->target_lut.lut);
-
+    // image_lut/lut/target_lut pl_lut pointers are not owned here -- they
+    // are borrowed from the core's LUT cache (freed by core_destroy above).
     pl_icc_close(&p->icc_profile);
 
     for (int i = 0; i < VO_PASS_PERF_MAX; ++i) {
@@ -1846,7 +1844,7 @@ static void update_icc_opts(struct priv *p, const struct mp_icc_opts *opts)
 static void update_lut(struct priv *p, struct user_lut *lut)
 {
     if (!lut->opt || !lut->opt[0]) {
-        pl_lut_free(&lut->lut);
+        lut->lut = NULL;
         TA_FREEP(&lut->path);
         return;
     }
@@ -1854,23 +1852,12 @@ static void update_lut(struct priv *p, struct user_lut *lut)
     if (lut->path && strcmp(lut->path, lut->opt) == 0)
         return; // no change
 
-    // Update cached path
-    pl_lut_free(&lut->lut);
+    // Path tracker stays on the VO side so VOCTRL_UPDATE_RENDER_OPTS's
+    // want_reset detection (opt-vs-path compare) keeps working; the LUT
+    // itself is loaded and cached by the core (one shared cache across
+    // the image/lut/target_lut call sites).
     talloc_replace(p, lut->path, lut->opt);
-
-    // Load LUT file
-    char *fname = mp_get_user_path(NULL, p->global, lut->path);
-    MP_VERBOSE(p, "Loading custom LUT '%s'\n", fname);
-    const int lut_max_size = 1536 << 20; // 1.5 GiB, matches lut cache limit
-    struct bstr lutdata = stream_read_file(fname, NULL, p->global, lut_max_size);
-    if (!lutdata.len) {
-        MP_ERR(p, "Failed to read LUT data from %s, make sure it's a valid file "
-                  "and smaller or equal to %d bytes\n", fname, lut_max_size);
-    } else {
-        lut->lut = pl_lut_parse_cube(p->pllog, lutdata.start, lutdata.len);
-    }
-    talloc_free(fname);
-    talloc_free(lutdata.start);
+    lut->lut = gpu_next_core_load_lut(p->core, p->global, lut->opt);
 }
 
 static void update_hook_opts(struct priv *p, char **opts, const char *shaderpath,

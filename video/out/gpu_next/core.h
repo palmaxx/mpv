@@ -24,6 +24,7 @@
 #include <libplacebo/log.h>
 #include <libplacebo/options.h>
 #include <libplacebo/shaders/icc.h>
+#include <libplacebo/shaders/lut.h>
 #include <libplacebo/utils/frame_queue.h>
 #include <libplacebo/utils/upload.h>
 
@@ -209,6 +210,17 @@ const struct pl_filter_config *gpu_next_core_map_scaler(
 const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
                                               struct mpv_global *global,
                                               const char *path);
+
+// Load (and cache, across options updates) the LUT (cube format) at the
+// given path as a libplacebo pl_custom_lut, or NULL on failure/empty
+// path. Mirrors gpu_next_core_load_hook: one cache shared across the
+// image/lut/target_lut call sites in the windowed VO (the libmpv backend
+// will share the same cache). Cache failures (path -> NULL) so a broken
+// file is not re-loaded every frame. The cache is owned by the core and
+// freed in gpu_next_core_destroy().
+struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
+                                             struct mpv_global *global,
+                                             const char *path);
 
 // Update the libplacebo hook's named parameters that have an auto-source
 // (gpu_get_auto_param in video/out/gpu/utils.c -- PTS, chroma_offset_*,
