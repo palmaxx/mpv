@@ -171,6 +171,17 @@ void gpu_next_core_flush_cache(struct gpu_next_core *core)
     pl_renderer_flush_cache(core->rr);
 }
 
+int gpu_next_core_required_frames(struct gpu_next_core *core)
+{
+    int req = 2;
+    const struct pl_filter_config *fm = core->pars->params.frame_mixer;
+    if (fm) {
+        req += ceilf(fm->kernel->radius) *
+               (core->pars->params.skip_anti_aliasing ? 1 : 2);
+    }
+    return req;
+}
+
 void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 {
     struct gpu_next_core *core = *core_ptr;
