@@ -112,8 +112,9 @@ struct priv {
     pl_gpu gpu;
     pl_swapchain sw;
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
-    pl_tex *sub_tex;
-    int num_sub_tex;
+    // OSD overlay-tex recycle pool now lives in gpu_next_core; the
+    // front-end pushes back at unmap (gpu_next_core_sub_tex_push) and
+    // pops on overlay rebuild (gpu_next_core_sub_tex_pop).
 
     struct mp_rect src, dst;
     struct mp_osd_res osd_res;
@@ -246,7 +247,7 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         struct osd_entry *entry = &state->entries[item->render_index];
         pl_fmt tex_fmt = p->osd_fmt[item->format];
         if (!entry->tex)
-            MP_TARRAY_POP(p->sub_tex, p->num_sub_tex, &entry->tex);
+            entry->tex = gpu_next_core_sub_tex_pop(p->core);
         bool ok = pl_tex_recreate(p->gpu, &entry->tex, &(struct pl_tex_params) {
             .format = tex_fmt,
             .w = MPMAX(item->packed_w, entry->tex ? entry->tex->params.w : 0),
@@ -618,11 +619,8 @@ static void unmap_frame(pl_gpu gpu, struct pl_frame *frame,
     struct mp_image *mpi = src->frame_data;
     struct frame_priv *fp = mpi->priv;
     struct priv *p = fp->vo->priv;
-    for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++) {
-        pl_tex tex = fp->subs.entries[i].tex;
-        if (tex)
-            MP_TARRAY_APPEND(p, p->sub_tex, p->num_sub_tex, tex);
-    }
+    for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++)
+        gpu_next_core_sub_tex_push(p->core, fp->subs.entries[i].tex);
     for (int i = 0; i < MP_ARRAY_SIZE(fp->el_tex); i++) {
         if (fp->el_tex[i])
             pl_tex_destroy(gpu, &fp->el_tex[i]);
@@ -1822,8 +1820,8 @@ static void uninit(struct vo *vo)
     gpu_next_core_destroy(&p->core);
     for (int i = 0; i < MP_ARRAY_SIZE(p->osd_state.entries); i++)
         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
-    for (int i = 0; i < p->num_sub_tex; i++)
-        pl_tex_destroy(p->gpu, &p->sub_tex[i]);
+    // sub_tex recycle pool is owned by the core and freed in
+    // gpu_next_core_destroy() above.
 
     timer_pool_destroy(p->sw_upload_timer);
 

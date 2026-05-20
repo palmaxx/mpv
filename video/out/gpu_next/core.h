@@ -232,6 +232,18 @@ struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
                                              struct mpv_global *global,
                                              const char *path);
 
+// OSD overlay-texture recycle pool. The front-end's libplacebo unmap
+// callback hands the per-frame OSD textures back to the pool when a
+// source frame is released (sub_tex_push), and the front-end's overlay
+// updater pops a recyclable tex when building the next frame's overlays
+// (sub_tex_pop, returns NULL when empty -- the caller then allocates
+// fresh). The pool is destroyed in gpu_next_core_destroy. The rest of
+// the OSD path (osd_render via vo->osd, p->osd_fmt[], the per-frame
+// frame_priv.subs cache, p->osd_state) stays with the front-end since
+// it is front-end-specific.
+void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex);
+pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core);
+
 // Update the libplacebo hook's named parameters that have an auto-source
 // (gpu_get_auto_param in video/out/gpu/utils.c -- PTS, chroma_offset_*,
 // HDR fields). The front-end calls this once per draw_frame per hook
