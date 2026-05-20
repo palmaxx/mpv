@@ -95,6 +95,14 @@ struct gpu_next_core {
     // to avoid re-trying a broken file. Freed in gpu_next_core_destroy.
     struct user_lut_cache_entry *lut_cache;
     int num_lut_cache;
+
+    // Pool of OSD overlay textures freed by the front-end's unmap callback
+    // (one entry per frame_priv.subs slot) and re-acquired by the front-end
+    // when the next frame's overlays are built. The textures themselves are
+    // recreated to fit on each acquire so the pool stores them by size
+    // hint, not strictly by content; destroyed in gpu_next_core_destroy.
+    pl_tex *sub_tex;
+    int num_sub_tex;
 };
 
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
@@ -185,6 +193,9 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 
     for (int i = 0; i < core->num_lut_cache; i++)
         pl_lut_free(&core->lut_cache[i].lut);
+
+    for (int i = 0; i < core->num_sub_tex; i++)
+        pl_tex_destroy(core->gpu, &core->sub_tex[i]);
 
     mp_assert(core->num_dr_buffers == 0);
     mp_mutex_destroy(&core->dr_lock);
@@ -708,6 +719,20 @@ struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
     });
 
     return lut;
+}
+
+void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex)
+{
+    if (!tex)
+        return;
+    MP_TARRAY_APPEND(core, core->sub_tex, core->num_sub_tex, tex);
+}
+
+pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core)
+{
+    pl_tex tex = NULL;
+    MP_TARRAY_POP(core->sub_tex, core->num_sub_tex, &tex);
+    return tex;
 }
 
 void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
