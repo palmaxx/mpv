@@ -50,6 +50,7 @@ extern "C" {
  * ------------------
  *
  * OpenGL: via MPV_RENDER_API_TYPE_OPENGL, see render_gl.h header.
+ * libplacebo OpenGL: via MPV_RENDER_API_TYPE_PL_OPENGL, see render_gl.h header.
  * Software: via MPV_RENDER_API_TYPE_SW, see section "Software renderer"
  *
  * Threading
@@ -466,6 +467,10 @@ typedef struct mpv_render_param {
  */
 // See render_gl.h
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
+// See render_gl.h. Like MPV_RENDER_API_TYPE_OPENGL (same init and FBO
+// parameters), but renders through the libplacebo-based gpu-next pipeline
+// instead of the legacy gpu pipeline.
+#define MPV_RENDER_API_TYPE_PL_OPENGL "pl-opengl"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
 
