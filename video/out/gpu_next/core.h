@@ -63,6 +63,40 @@ pl_renderer gpu_next_core_renderer(struct gpu_next_core *core);
 // first in gpu_next_core_destroy(); see the contract there.
 pl_queue gpu_next_core_queue(struct gpu_next_core *core);
 
+// pl_queue lifecycle, owned by the core alongside the queue object. The
+// windowed VO drove this state machine inline; centralising it here lets
+// the libmpv render backend reuse the exact same frame-ingest logic.
+
+// Before pushing a new batch of source frames, check whether the queue's
+// head virtual PTS has already advanced past the frame the front-end is
+// about to show (which happens after a non-monotonic PTS request); if so,
+// latch a deferred reset. current_pts is the front-end's current frame
+// PTS; pts_offset/ideal_frame_vsync_duration drive the decision and the
+// log message. A reset already latched is left untouched.
+void gpu_next_core_queue_check_refill(struct gpu_next_core *core,
+                                      double current_pts, double pts_offset,
+                                      double ideal_frame_vsync_duration);
+
+// Per-source-frame ingest gate, called once per incoming frame id before
+// pl_queue_push. Honours any latched reset (pl_queue_reset, then a cache
+// flush) and cache-flush request, then deduplicates already-seen ids.
+// Returns true if the front-end should push this frame, false to skip it.
+bool gpu_next_core_queue_accept(struct gpu_next_core *core, int id);
+
+// Latch a deferred queue reset, honoured at the next
+// gpu_next_core_queue_accept(). Used by VOCTRL_RESET (seek) and on an
+// --image-lut change.
+void gpu_next_core_queue_request_reset(struct gpu_next_core *core);
+
+// Latch (or clear) a deferred renderer-cache flush, honoured at the next
+// gpu_next_core_queue_accept(). Set by a render-options update.
+void gpu_next_core_queue_set_flush(struct gpu_next_core *core, bool flush);
+
+// The last virtual PTS handed to pl_queue_update. The draw path records
+// it; the screenshot path reads it back to retrieve the current frame.
+void gpu_next_core_queue_set_last_pts(struct gpu_next_core *core, double pts);
+double gpu_next_core_queue_last_pts(struct gpu_next_core *core);
+
 // Render a frame mix into target (the windowed VO's draw_frame path).
 // Swapchain-free: the front-end acquires target, drives the colorspace
 // hint, and presents the result; the same entry point will back the

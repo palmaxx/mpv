@@ -120,12 +120,8 @@ struct priv {
     struct mp_osd_res osd_res;
     struct osd_state osd_state;
 
-    uint64_t last_id;
     uint64_t osd_sync;
-    double last_pts;
     bool is_interpolated;
-    bool want_reset;
-    bool flush_cache;
     bool frame_pending;
     bool paused;
 
@@ -839,46 +835,17 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         params.distort_params = NULL;
     }
 
-    // pl_queue advances its internal virtual PTS and culls available frames
-    // based on this value and the VPS/FPS ratio. Requesting a non-monotonic PTS
-    // is an invalid use of pl_queue. Reset it if this happens in an attempt to
-    // recover as much as possible. Ideally, this should never occur, and if it
-    // does, it should be corrected. The ideal_frame_vsync may be negative if
-    // the last draw did not align perfectly with the vsync. In this case, we
-    // should have the previous frame available in pl_queue, or a reset is
-    // already requested. Clamp the check to 0, as we don't have the previous
-    // frame in vo_frame anyway.
-    struct pl_source_frame vpts;
-    if (frame->current && !p->want_reset) {
-        if (pl_queue_peek(gpu_next_core_queue(p->core), 0, &vpts) &&
-            frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
-        {
-            MP_VERBOSE(vo, "Forcing queue refill, PTS(%f + %f | %f) < VPTS(%f)\n",
-                       frame->current->pts, pts_offset,
-                       frame->ideal_frame_vsync_duration, vpts.pts);
-            p->want_reset = true;
-        }
+    if (frame->current) {
+        gpu_next_core_queue_check_refill(p->core, frame->current->pts,
+                                         pts_offset,
+                                         frame->ideal_frame_vsync_duration);
     }
 
     // Push all incoming frames into the frame queue
     for (int n = 0; n < frame->num_frames; n++) {
         int id = frame->frame_id + n;
-
-        if (p->want_reset) {
-            pl_queue_reset(gpu_next_core_queue(p->core));
-            p->last_pts = 0.0;
-            p->last_id = 0;
-            p->want_reset = false;
-            p->flush_cache = true;
-        }
-
-        if (p->flush_cache) {
-            gpu_next_core_flush_cache(p->core);
-            p->flush_cache = false;
-        }
-
-        if (id <= p->last_id)
-            continue; // ignore already seen frames
+        if (!gpu_next_core_queue_accept(p->core, id))
+            continue;
 
         struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
         struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
@@ -893,8 +860,6 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             .unmap = unmap_frame,
             .discard = discard_frame,
         });
-
-        p->last_id = id;
     }
 
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
@@ -1032,7 +997,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             MP_VERBOSE(vo, "Clamping first frame PTS from %f to %f\n", qparams.pts, first.pts);
             qparams.pts = first.pts;
         }
-        p->last_pts = qparams.pts;
+        gpu_next_core_queue_set_last_pts(p->core, qparams.pts);
 
         switch (pl_queue_update(gpu_next_core_queue(p->core), &mix, &qparams)) {
         case PL_QUEUE_ERR:
@@ -1282,7 +1247,7 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
     struct pl_frame_mix mix;
     enum pl_queue_status status;
     struct pl_queue_params qparams = *pl_queue_params(
-        .pts = p->last_pts,
+        .pts = gpu_next_core_queue_last_pts(p->core),
         .drift_compensation = 0,
     );
     status = pl_queue_update(gpu_next_core_queue(p->core), &mix, &qparams);
@@ -1545,9 +1510,12 @@ static int control(struct vo *vo, uint32_t request, void *data)
         int old_type = p->next_opts->image_lut.type;
         update_options(vo);
         struct user_lut image_lut = p->next_opts->image_lut;
-        p->want_reset |= image_lut.opt && ((!image_lut.path && image_lut.opt) ||
-                         (image_lut.path && strcmp(image_lut.path, image_lut.opt)) ||
-                         (old_type != image_lut.type));
+        if (image_lut.opt && ((!image_lut.path && image_lut.opt) ||
+            (image_lut.path && strcmp(image_lut.path, image_lut.opt)) ||
+            (old_type != image_lut.type)))
+        {
+            gpu_next_core_queue_request_reset(p->core);
+        }
 
         // Also re-query the auto profile, in case `update_render_options`
         // unloaded a manually specified icc profile in favor of
@@ -1560,7 +1528,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
 
     case VOCTRL_RESET:
         // Defer until the first new frame (unique ID) actually arrives
-        p->want_reset = true;
+        gpu_next_core_queue_request_reset(p->core);
         return VO_TRUE;
 
     case VOCTRL_PERFORMANCE_DATA: {
@@ -1959,7 +1927,7 @@ static void update_lut(struct priv *p, struct user_lut *lut)
         return; // no change
 
     // Path tracker stays on the VO side so VOCTRL_UPDATE_RENDER_OPTS's
-    // want_reset detection (opt-vs-path compare) keeps working; the LUT
+    // queue-reset request (opt-vs-path compare) keeps working; the LUT
     // itself is loaded and cached by the core (one shared cache across
     // the image/lut/target_lut call sites).
     talloc_replace(p, lut->path, lut->opt);
@@ -2180,7 +2148,7 @@ AV_NOWARN_DEPRECATED(
     pars->params.hooks = p->hooks;
 
     MP_DBG(p, "Render options updated, flushing renderer cache.\n");
-    p->flush_cache = p->paused || !p->next_opts->inter_preserve;
+    gpu_next_core_queue_set_flush(p->core, p->paused || !p->next_opts->inter_preserve);
 }
 
 const struct vo_driver video_out_gpu_next = {
