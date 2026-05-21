@@ -71,6 +71,16 @@ struct gpu_next_core {
     pl_renderer rr;
     pl_queue queue;
 
+    // pl_queue lifecycle state. want_reset/flush_cache are deferred
+    // requests honoured at the next gpu_next_core_queue_accept(); last_id
+    // deduplicates already-pushed source frames; last_pts is the last
+    // virtual PTS handed to pl_queue_update (read back by the screenshot
+    // path).
+    uint64_t last_id;
+    double last_pts;
+    bool want_reset;
+    bool flush_cache;
+
     // Hwdec interop (mapper created lazily on the first hwdec frame and
     // refreshed when params change; destroyed in gpu_next_core_destroy
     // AFTER the queue so in-flight frames' release callbacks still see a
@@ -169,6 +179,74 @@ bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
 void gpu_next_core_flush_cache(struct gpu_next_core *core)
 {
     pl_renderer_flush_cache(core->rr);
+}
+
+void gpu_next_core_queue_check_refill(struct gpu_next_core *core,
+                                      double current_pts, double pts_offset,
+                                      double ideal_frame_vsync_duration)
+{
+    if (core->want_reset)
+        return;
+
+    // pl_queue advances its internal virtual PTS and culls available frames
+    // based on this value and the VPS/FPS ratio. Requesting a non-monotonic PTS
+    // is an invalid use of pl_queue. Reset it if this happens in an attempt to
+    // recover as much as possible. Ideally, this should never occur, and if it
+    // does, it should be corrected. The ideal_frame_vsync may be negative if
+    // the last draw did not align perfectly with the vsync. In this case, we
+    // should have the previous frame available in pl_queue, or a reset is
+    // already requested. Clamp the check to 0, as we don't have the previous
+    // frame in vo_frame anyway.
+    struct pl_source_frame vpts;
+    if (pl_queue_peek(core->queue, 0, &vpts) &&
+        current_pts + MPMAX(0, pts_offset) < vpts.pts)
+    {
+        MP_VERBOSE(core, "Forcing queue refill, PTS(%f + %f | %f) < VPTS(%f)\n",
+                   current_pts, pts_offset, ideal_frame_vsync_duration, vpts.pts);
+        core->want_reset = true;
+    }
+}
+
+bool gpu_next_core_queue_accept(struct gpu_next_core *core, int id)
+{
+    if (core->want_reset) {
+        pl_queue_reset(core->queue);
+        core->last_pts = 0.0;
+        core->last_id = 0;
+        core->want_reset = false;
+        core->flush_cache = true;
+    }
+
+    if (core->flush_cache) {
+        gpu_next_core_flush_cache(core);
+        core->flush_cache = false;
+    }
+
+    if (id <= core->last_id)
+        return false; // ignore already seen frames
+
+    core->last_id = id;
+    return true;
+}
+
+void gpu_next_core_queue_request_reset(struct gpu_next_core *core)
+{
+    core->want_reset = true;
+}
+
+void gpu_next_core_queue_set_flush(struct gpu_next_core *core, bool flush)
+{
+    core->flush_cache = flush;
+}
+
+void gpu_next_core_queue_set_last_pts(struct gpu_next_core *core, double pts)
+{
+    core->last_pts = pts;
+}
+
+double gpu_next_core_queue_last_pts(struct gpu_next_core *core)
+{
+    return core->last_pts;
 }
 
 int gpu_next_core_required_frames(struct gpu_next_core *core)
