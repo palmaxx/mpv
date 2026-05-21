@@ -1320,6 +1320,9 @@ if features['gl']
                      'video/out/opengl/libmpv_gl.c',
                      'video/out/opengl/ra_gl.c',
                      'video/out/opengl/utils.c')
+    if libplacebo.get_variable('pl_has_opengl', default_value: '0') == '1'
+        sources += files('video/out/opengl/libmpv_pl_gl.c')
+    endif
 elif not features['gl'] and get_option('gl').enabled()
     error('gl enabled but no OpenGL video output could be found!')
 endif

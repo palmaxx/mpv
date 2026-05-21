@@ -17,13 +17,22 @@
 
 #include <string.h>
 
+#include <libplacebo/config.h>
+
+#include "config.h"
 #include "libmpv_gpu_next.h"
 
 #include "mpv/render.h"
 #include "video/out/libmpv.h"
 
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+extern const struct libmpv_pl_context_fns libmpv_pl_context_gl;
+#endif
+
 static const struct libmpv_pl_context_fns *context_backends[] = {
-    // First impl (libmpv_pl_context_gl) lands in the next wiring commit.
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+    &libmpv_pl_context_gl,
+#endif
     NULL,
 };
 
