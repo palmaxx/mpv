@@ -626,6 +626,14 @@ static void update_options(struct vo *vo)
     pars->params.lut = p->next_opts->lut.lut;
     pars->params.lut_type = p->next_opts->lut.type;
 
+    // Resolve the image LUT and hand it to the core; the core's map
+    // callback applies it per source frame. An --image-lut change forces a
+    // queue reset (VOCTRL_UPDATE_RENDER_OPTS), so no in-flight frame can
+    // straddle a change.
+    update_lut(p, &p->next_opts->image_lut);
+    gpu_next_core_set_image_lut(p->core, p->next_opts->image_lut.lut,
+                               p->next_opts->image_lut.type);
+
     // Update equalizer state
     struct mp_csp_params cparams = MP_CSP_PARAMS_DEFAULTS;
     const struct gl_video_opts *opts = p->opts_cache->opts;
@@ -1413,15 +1421,20 @@ static int control(struct vo *vo, uint32_t request, void *data)
         vo->want_redraw = true;
 
         // Special case for --image-lut which requires a full reset.
+        // update_options() now resolves the image LUT, updating its path
+        // tracker in place, so capture the pre-update path/type to detect
+        // a change.
+        char *old_image_lut = talloc_strdup(NULL, p->next_opts->image_lut.path);
         int old_type = p->next_opts->image_lut.type;
         update_options(vo);
         struct user_lut image_lut = p->next_opts->image_lut;
-        if (image_lut.opt && ((!image_lut.path && image_lut.opt) ||
-            (image_lut.path && strcmp(image_lut.path, image_lut.opt)) ||
+        if (image_lut.opt && ((!old_image_lut && image_lut.opt) ||
+            (old_image_lut && strcmp(old_image_lut, image_lut.opt)) ||
             (old_type != image_lut.type)))
         {
             gpu_next_core_queue_request_reset(p->core);
         }
+        talloc_free(old_image_lut);
 
         // Also re-query the auto profile, in case `update_render_options`
         // unloaded a manually specified icc profile in favor of
@@ -1719,6 +1732,24 @@ static void load_hwdec_api(void *ctx, struct hwdec_imgfmt_request *params)
     vo_control(ctx, VOCTRL_LOAD_HWDEC_API, params);
 }
 
+// Thin front-end glue for gpu_next_core_frontend: the core's timer hooks
+// are stats_time_start/_end bound to this VO's stats_ctx, and its hwdec
+// lookup is ra_hwdec_get over this VO's ra_hwdec_ctx registry.
+static void core_timer_start(void *ctx, const char *name)
+{
+    stats_time_start(ctx, name);
+}
+
+static void core_timer_end(void *ctx, const char *name)
+{
+    stats_time_end(ctx, name);
+}
+
+static struct ra_hwdec *core_hwdec_get(void *ctx, int imgfmt)
+{
+    return ra_hwdec_get(ctx, imgfmt);
+}
+
 static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -1759,6 +1790,15 @@ static int preinit(struct vo *vo)
 
     pl_gpu_set_cache(p->gpu, p->shader_cache.cache);
     p->core = gpu_next_core_create(p->gpu, p->log, p->pllog);
+    gpu_next_core_set_frontend(p->core, &(struct gpu_next_core_frontend) {
+        .opts = p->opts_cache->opts,
+        .ra = p->ra_ctx->ra,
+        .timer_ctx = p->stats,
+        .timer_start = core_timer_start,
+        .timer_end = core_timer_end,
+        .hwdec_get = core_hwdec_get,
+        .hwdec_ctx = &p->hwdec_ctx,
+    });
     p->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(p->gpu, "r8");
     p->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(p->gpu, "bgra8");
     p->osd_sync = 1;

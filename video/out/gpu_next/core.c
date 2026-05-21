@@ -137,6 +137,16 @@ struct gpu_next_core {
     // hint, not strictly by content; destroyed in gpu_next_core_destroy.
     pl_tex *sub_tex;
     int num_sub_tex;
+
+    // Front-end interface (see gpu_next_core_set_frontend), reached by the
+    // core's frame-ingest callbacks for genuinely front-end-specific
+    // resources (opts, ra, instrumentation, hwdec lookup).
+    struct gpu_next_core_frontend fe;
+
+    // Resolved image LUT, set by the front-end's options-update path
+    // (gpu_next_core_set_image_lut) and mapped onto each source frame.
+    struct pl_custom_lut *image_lut;
+    enum pl_lut_type image_lut_type;
 };
 
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
@@ -166,6 +176,20 @@ pl_renderer gpu_next_core_renderer(struct gpu_next_core *core)
 pl_queue gpu_next_core_queue(struct gpu_next_core *core)
 {
     return core->queue;
+}
+
+void gpu_next_core_set_frontend(struct gpu_next_core *core,
+                                const struct gpu_next_core_frontend *fe)
+{
+    core->fe = *fe;
+}
+
+void gpu_next_core_set_image_lut(struct gpu_next_core *core,
+                                 struct pl_custom_lut *lut,
+                                 enum pl_lut_type type)
+{
+    core->image_lut = lut;
+    core->image_lut_type = type;
 }
 
 static void info_callback(void *priv, const struct pl_render_info *info)
