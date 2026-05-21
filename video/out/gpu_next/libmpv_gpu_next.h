@@ -25,14 +25,6 @@
 #include "mpv/render.h"
 #include "video/out/libmpv.h"
 
-// libplacebo-backed render backend, parallel to render_backend_gpu (which is
-// the RA/gl_video backend). Driven by the same gpu_next_core that backs the
-// windowed vo_gpu_next VO, mirroring how gl_video is shared between vo_gpu.c
-// and the gpu/libmpv_gpu.c backend. Not yet registered in render_backends[];
-// the registration and the per-GPU-API context-fns implementations land in
-// subsequent commits.
-extern const struct render_backend_fns render_backend_gpu_next;
-
 // Per-GPU-API surface-wrap layer, parallel to libmpv_gpu_context_fns. Manages
 // the libplacebo-side interaction between libmpv and the host's render API
 // (init / wrap target surface / present), which is not something the renderer

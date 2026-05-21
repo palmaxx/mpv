@@ -54,6 +54,10 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
     struct pl_opengl_params pl_params = *pl_opengl_params(
         .get_proc_addr_ex = (void *)p->gl->get_fn,
         .proc_ctx = p->gl->fn_ctx,
+        // The render-API host owns the GL context; honour its choice rather
+        // than rejecting a software rasterizer, as libmpv_gl.c does for the
+        // gpu backend (ra_ctx_opts.allow_sw = true).
+        .allow_software = true,
     );
     p->pl_gl = pl_opengl_create(ctx->pllog, &pl_params);
     if (!p->pl_gl) {
@@ -117,9 +121,7 @@ static void destroy(struct libmpv_pl_context *ctx)
 }
 
 const struct libmpv_pl_context_fns libmpv_pl_context_gl = {
-    // Placeholder string until the public MPV_RENDER_API_TYPE_* constant
-    // for this backend lands (added in the registration commit).
-    .api_name = "pl-opengl",
+    .api_name = MPV_RENDER_API_TYPE_PL_OPENGL,
     .init = init,
     .wrap_fbo = wrap_fbo,
     .done_frame = done_frame,
