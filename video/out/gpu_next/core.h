@@ -28,6 +28,7 @@
 #include <libplacebo/utils/frame_queue.h>
 #include <libplacebo/utils/upload.h>
 
+#include "sub/osd.h"
 #include "video/img_format.h"
 #include "video/out/gpu/video.h"
 
@@ -39,6 +40,7 @@ struct mpv_global;
 struct pl_hook;
 struct ra;
 struct ra_hwdec;
+struct vo;
 struct voctrl_performance_data;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
@@ -97,6 +99,61 @@ void gpu_next_core_set_frontend(struct gpu_next_core *core,
 void gpu_next_core_set_image_lut(struct gpu_next_core *core,
                                  struct pl_custom_lut *lut,
                                  enum pl_lut_type type);
+
+// libplacebo OSD overlay state for one frame's worth of subtitle/OSD
+// bitmaps: a recyclable texture plus its built pl_overlay parts, per OSD
+// part slot. mpv's core already has an (opaque) struct osd_state in
+// sub/osd_state.h, so this one -- VO-private until it moved into this
+// shared header -- carries the gpu_next_ prefix to avoid the clash.
+struct gpu_next_osd_entry {
+    pl_tex tex;
+    struct pl_overlay_part *parts;
+    int num_parts;
+};
+
+struct gpu_next_osd_state {
+    struct gpu_next_osd_entry entries[MAX_OSD_PARTS];
+    struct pl_overlay overlays[MAX_OSD_PARTS];
+};
+
+// Per-source-frame private data, hung off mp_image->priv for every frame
+// pushed into the queue and allocated as a talloc child of that mp_image
+// by the front-end's push loop. Visible to both the core (its map/unmap
+// callbacks) and the front-end (its per-frame overlay loop, VO-side
+// until E6).
+struct frame_priv {
+    // Back-reference to the owning core, set by the front-end at push.
+    struct gpu_next_core *core;
+
+    // TRANSITIONAL: still needed by the VO-side map_frame and the hwdec
+    // acquire/release shims; removed once map_frame moves into the core.
+    struct vo *vo;
+
+    // hwdec resolved for this frame (NULL for software frames), looked
+    // up in map_frame.
+    struct ra_hwdec *hwdec;
+    // Optional Dolby Vision FEL.
+    struct ra_hwdec *el_hwdec;
+    pl_tex el_tex[4];
+    struct pl_frame el_frame;
+
+    // Per-frame blended-subtitle overlay cache, populated by the
+    // front-end's overlay loop; unmap returns its textures to the pool.
+    struct gpu_next_osd_state subs;
+    uint64_t osd_sync;
+};
+
+// pl_queue unmap/discard callbacks owned by the core. The front-end's
+// push loop installs these on the pl_source_frame; centralising them
+// (with map_frame, in a later step) gives the libmpv render backend the
+// exact same frame-ingest path with zero callback duplication.
+//
+// unmap returns the frame's OSD overlay textures to the core's sub_tex
+// recycle pool and frees the mp_image; discard (a frame dropped before
+// it was ever mapped) just frees the mp_image.
+void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
+                               const struct pl_source_frame *src);
+void gpu_next_core_discard_frame(const struct pl_source_frame *src);
 
 // The libplacebo options/render-params object owned by the core. The
 // front-end populates pars->params before driving the render.

@@ -64,17 +64,6 @@
 #endif
 
 
-struct osd_entry {
-    pl_tex tex;
-    struct pl_overlay_part *parts;
-    int num_parts;
-};
-
-struct osd_state {
-    struct osd_entry entries[MAX_OSD_PARTS];
-    struct pl_overlay overlays[MAX_OSD_PARTS];
-};
-
 struct user_lut {
     char *opt;
     char *path;
@@ -111,7 +100,7 @@ struct priv {
 
     struct mp_rect src, dst;
     struct mp_osd_res osd_res;
-    struct osd_state osd_state;
+    struct gpu_next_osd_state osd_state;
 
     uint64_t osd_sync;
     bool is_interpolated;
@@ -211,7 +200,7 @@ static struct mp_image *get_image(struct vo *vo, int imgfmt, int w, int h,
 
 static void update_overlays(struct vo *vo, struct mp_osd_res res,
                             int flags, enum pl_overlay_coords coords,
-                            struct osd_state *state, struct pl_frame *frame,
+                            struct gpu_next_osd_state *state, struct pl_frame *frame,
                             struct mp_image *src, int stereo_mode)
 {
     struct priv *p = vo->priv;
@@ -229,7 +218,7 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
         const struct sub_bitmaps *item = subs->items[n];
         if (!item->num_parts || !item->packed)
             continue;
-        struct osd_entry *entry = &state->entries[item->render_index];
+        struct gpu_next_osd_entry *entry = &state->entries[item->render_index];
         pl_fmt tex_fmt = p->osd_fmt[item->format];
         if (!entry->tex)
             entry->tex = gpu_next_core_sub_tex_pop(p->core);
@@ -357,17 +346,6 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
 
     talloc_free(subs);
 }
-
-struct frame_priv {
-    struct vo *vo;
-    struct osd_state subs;
-    uint64_t osd_sync;
-    struct ra_hwdec *hwdec;
-    // Optional Dolby Vision FEL.
-    struct ra_hwdec *el_hwdec;
-    pl_tex el_tex[4];
-    struct pl_frame el_frame;
-};
 
 static void setup_hwdec_plane_mapping(struct pl_frame *frame,
                                       const struct mp_imgfmt_desc *desc)
@@ -592,6 +570,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     return true;
 }
 
+<<<<<<< HEAD
 static void unmap_frame(pl_gpu gpu, struct pl_frame *frame,
                         const struct pl_source_frame *src)
 {
@@ -613,6 +592,9 @@ static void discard_frame(const struct pl_source_frame *src)
     talloc_free(mpi);
 }
 
+=======
+>>>>>>> 1fb43bfe00 (vo_gpu_next: move frame_priv + unmap/discard into gpu_next/core (E5.2)
+)
 static void update_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -821,6 +803,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
         struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
         mpi->priv = fp;
+        fp->core = p->core;
         fp->vo = vo;
 
         pl_queue_push(gpu_next_core_queue(p->core), &(struct pl_source_frame) {
@@ -828,8 +811,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             .duration = can_interpolate ? frame->approx_duration : 0,
             .frame_data = mpi,
             .map = map_frame,
-            .unmap = unmap_frame,
-            .discard = discard_frame,
+            .unmap = gpu_next_core_unmap_frame,
+            .discard = gpu_next_core_discard_frame,
         });
     }
 
