@@ -53,6 +53,51 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
                                            pl_log pllog);
 void gpu_next_core_destroy(struct gpu_next_core **core);
 
+// Front-end-specific resources the core's frame-ingest callbacks
+// (map/unmap/discard) reach through, instead of a back-pointer to the
+// front-end. The front-end fills this in once after gpu_next_core_create()
+// and installs it with gpu_next_core_set_frontend(); the core keeps a
+// copy. This mirrors mpv's existing shared-core/two-front-end interfaces
+// (render_backend_fns, libmpv_gpu_context_fns).
+struct gpu_next_core_frontend {
+    // Resolved gl_video_opts. This is the stable m_config_cache->opts
+    // pointer -- m_config_cache_update() copies new values into the same
+    // buffer -- so the core may hold it for its whole lifetime and read
+    // live option values at map time.
+    const struct gl_video_opts *opts;
+
+    // RA handle, used to lazily create the SW-upload / hwdec perf timers
+    // and to wrap hwdec plane textures.
+    struct ra *ra;
+
+    // Optional instrumentation hooks. The windowed VO supplies thin
+    // wrappers over stats_time_start/_end bound to its stats_ctx; the
+    // libmpv render backend has no stats_ctx and leaves these NULL, in
+    // which case the core skips the timing wrap.
+    void *timer_ctx;
+    void (*timer_start)(void *ctx, const char *name);
+    void (*timer_end)(void *ctx, const char *name);
+
+    // Hwdec registry lookup, called from the core's map callback at map
+    // time (mirroring ra_hwdec_get). NULL means SW decoding only.
+    struct ra_hwdec *(*hwdec_get)(void *ctx, int imgfmt);
+    void *hwdec_ctx;
+};
+
+// Install the front-end interface (see struct gpu_next_core_frontend).
+// The core copies *fe; the caller may free the struct afterwards.
+void gpu_next_core_set_frontend(struct gpu_next_core *core,
+                                const struct gpu_next_core_frontend *fe);
+
+// Store the resolved image LUT; the core's map callback applies it to
+// each source frame. An --image-lut change forces a queue reset
+// (gpu_next_core_queue_request_reset), so no in-flight frame can straddle
+// a change. The front-end re-sets this from its options-update path; lut
+// may be NULL (no image LUT).
+void gpu_next_core_set_image_lut(struct gpu_next_core *core,
+                                 struct pl_custom_lut *lut,
+                                 enum pl_lut_type type);
+
 // The libplacebo options/render-params object owned by the core. The
 // front-end populates pars->params before driving the render.
 pl_options gpu_next_core_options(struct gpu_next_core *core);
