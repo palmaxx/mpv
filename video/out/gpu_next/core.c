@@ -62,6 +62,11 @@ struct user_lut_cache_entry {
     struct pl_custom_lut *lut;
 };
 
+struct frame_info {
+    int count;
+    struct pl_dispatch_info info[VO_PASS_PERF_MAX];
+};
+
 struct gpu_next_core {
     pl_gpu gpu;
     pl_log pllog;
@@ -93,6 +98,14 @@ struct gpu_next_core {
     // (gpu_next_core_upload_sw_planes), destroyed in gpu_next_core_destroy.
     struct timer_pool *sw_upload_timer;
     struct mp_pass_perf sw_upload_perf;
+
+    // Render-pass perf for the last frame, collected by info_callback
+    // (installed by gpu_next_core_render_mix). perf_fresh = fresh-frame
+    // passes, perf_redraw = blend/redraw passes; consumed by
+    // gpu_next_core_get_perf_data. The pl_dispatch_info shader refs are
+    // released in gpu_next_core_destroy.
+    struct frame_info perf_fresh;
+    struct frame_info perf_redraw;
 
     // Allocated DR buffers
     mp_mutex dr_lock;
@@ -149,12 +162,37 @@ pl_queue gpu_next_core_queue(struct gpu_next_core *core)
     return core->queue;
 }
 
+static void info_callback(void *priv, const struct pl_render_info *info)
+{
+    struct gpu_next_core *core = priv;
+    if (info->index >= VO_PASS_PERF_MAX)
+        return; // silently ignore clipped passes, whatever
+
+    struct frame_info *frame;
+    switch (info->stage) {
+    case PL_RENDER_STAGE_FRAME: frame = &core->perf_fresh; break;
+    case PL_RENDER_STAGE_BLEND: frame = &core->perf_redraw; break;
+    default: abort();
+    }
+
+    frame->count = info->index + 1;
+    pl_dispatch_info_move(&frame->info[info->index], info->pass);
+}
+
 bool gpu_next_core_render_mix(struct gpu_next_core *core,
                               const struct pl_frame_mix *mix,
                               struct pl_frame *target,
                               const struct pl_render_params *params)
 {
-    if (!pl_render_image_mix(core->rr, mix, target, params))
+    // The draw path always wants render-pass timings, so install the
+    // core's perf callback here -- both front-ends get it for free. The
+    // screenshot path uses gpu_next_core_render_image() instead, which
+    // deliberately has no info callback, matching mainline.
+    struct pl_render_params rparams = *params;
+    rparams.info_callback = info_callback;
+    rparams.info_priv = core;
+
+    if (!pl_render_image_mix(core->rr, mix, target, &rparams))
         return false;
 
     // mpv calls pl_frames_infer_mix purely for its side effects: it updates
@@ -179,6 +217,59 @@ bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
                                     struct pl_hdr_metadata *metadata)
 {
     return pl_renderer_get_hdr_metadata(core->rr, metadata);
+}
+
+static void copy_frame_info_to_mp(struct frame_info *pl,
+                                  struct mp_frame_perf *mp,
+                                  struct mp_pass_perf *hwdec_perf,
+                                  struct mp_pass_perf *sw_upload_perf)
+{
+    static_assert(MP_ARRAY_SIZE(pl->info) == MP_ARRAY_SIZE(mp->perf), "");
+    mp_assert(pl->count <= VO_PASS_PERF_MAX);
+
+    struct mp_pass_perf *perf = mp->perf;
+    char (*desc)[VO_PASS_DESC_MAX_LEN] = mp->desc;
+    struct mp_pass_perf *perf_end = perf + VO_PASS_PERF_MAX;
+
+    if (hwdec_perf && hwdec_perf->count > 0) {
+        *perf++ = *hwdec_perf;
+        snprintf(*desc, sizeof(*desc), "map frame (hwdec)");
+        desc++;
+    }
+
+    if (sw_upload_perf && sw_upload_perf->count > 0) {
+        *perf++ = *sw_upload_perf;
+        snprintf(*desc, sizeof(*desc), "upload frame");
+        desc++;
+    }
+
+    for (int i = 0; i < pl->count && perf < perf_end; ++i) {
+        const struct pl_dispatch_info *pass = &pl->info[i];
+
+        static_assert(VO_PERF_SAMPLE_COUNT >= MP_ARRAY_SIZE(pass->samples), "");
+        mp_assert(pass->num_samples <= MP_ARRAY_SIZE(pass->samples));
+
+        perf->count = MPMIN(pass->num_samples, VO_PERF_SAMPLE_COUNT);
+        memcpy(perf->samples, pass->samples, perf->count * sizeof(pass->samples[0]));
+        perf->last = pass->last;
+        perf->peak = pass->peak;
+        perf->avg = pass->average;
+
+        strncpy(*desc, pass->shader->description, sizeof(*desc) - 1);
+        (*desc)[sizeof(*desc) - 1] = '\0';
+        perf++;
+        desc++;
+    }
+
+    mp->count = perf - mp->perf;
+}
+
+void gpu_next_core_get_perf_data(struct gpu_next_core *core,
+                                 struct voctrl_performance_data *perf)
+{
+    copy_frame_info_to_mp(&core->perf_fresh, &perf->fresh,
+                          &core->hwdec_perf, &core->sw_upload_perf);
+    copy_frame_info_to_mp(&core->perf_redraw, &perf->redraw, NULL, NULL);
 }
 
 void gpu_next_core_flush_cache(struct gpu_next_core *core)
@@ -309,6 +400,11 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 
     for (int i = 0; i < core->num_sub_tex; i++)
         pl_tex_destroy(core->gpu, &core->sub_tex[i]);
+
+    for (int i = 0; i < VO_PASS_PERF_MAX; ++i) {
+        pl_shader_info_deref(&core->perf_fresh.info[i].shader);
+        pl_shader_info_deref(&core->perf_redraw.info[i].shader);
+    }
 
     mp_assert(core->num_dr_buffers == 0);
     mp_mutex_destroy(&core->dr_lock);
@@ -571,11 +667,6 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
     return true;
 }
 
-struct mp_pass_perf gpu_next_core_sw_upload_perf(const struct gpu_next_core *core)
-{
-    return core->sw_upload_perf;
-}
-
 void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core)
 {
     core->sw_upload_perf.count = 0;
@@ -687,11 +778,6 @@ void gpu_next_core_hwdec_release(struct gpu_next_core *core,
     }
 
     ra_hwdec_mapper_unmap(core->hwdec_mapper);
-}
-
-struct mp_pass_perf gpu_next_core_hwdec_perf(const struct gpu_next_core *core)
-{
-    return core->hwdec_perf;
 }
 
 void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core)
