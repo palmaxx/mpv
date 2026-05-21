@@ -89,6 +89,11 @@ struct gpu_next_core {
     struct timer_pool *hwdec_timer;
     struct mp_pass_perf hwdec_perf;
 
+    // SW-upload perf: timer created lazily on the first software frame
+    // (gpu_next_core_upload_sw_planes), destroyed in gpu_next_core_destroy.
+    struct timer_pool *sw_upload_timer;
+    struct mp_pass_perf sw_upload_perf;
+
     // Allocated DR buffers
     mp_mutex dr_lock;
     pl_buf *dr_buffers;
@@ -293,6 +298,8 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
     ra_hwdec_mapper_free(&core->hwdec_mapper);
     timer_pool_destroy(core->hwdec_timer);
     core->hwdec_timer = NULL;
+    timer_pool_destroy(core->sw_upload_timer);
+    core->sw_upload_timer = NULL;
 
     for (int i = 0; i < core->num_user_hooks; i++)
         pl_mpv_user_shader_destroy(&core->user_hooks[i].hook);
@@ -497,11 +504,17 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint)
 }
 
 bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
+                                    struct ra *ra,
                                     struct mp_image *mpi,
                                     pl_tex *tex,
                                     struct pl_frame *frame)
 {
     pl_gpu gpu = core->gpu;
+
+    if (!core->sw_upload_timer)
+        core->sw_upload_timer = timer_pool_create(ra);
+    timer_pool_start(core->sw_upload_timer);
+
     struct pl_plane_data data[4] = {0};
     bool use_uint = false;
 
@@ -544,6 +557,7 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
             MP_ERR(core, "Failed uploading frame!\n");
             talloc_free(data[n].priv);
             talloc_free(mpi);
+            timer_pool_stop(core->sw_upload_timer);
             return false;
         }
 
@@ -552,7 +566,19 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
             while (pl_buf_poll(gpu, data[n].buf, UINT64_MAX));
     }
 
+    timer_pool_stop(core->sw_upload_timer);
+    core->sw_upload_perf = timer_pool_measure(core->sw_upload_timer);
     return true;
+}
+
+struct mp_pass_perf gpu_next_core_sw_upload_perf(const struct gpu_next_core *core)
+{
+    return core->sw_upload_perf;
+}
+
+void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core)
+{
+    core->sw_upload_perf.count = 0;
 }
 
 bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
