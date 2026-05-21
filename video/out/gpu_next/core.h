@@ -92,9 +92,20 @@ void gpu_next_core_queue_request_reset(struct gpu_next_core *core);
 // gpu_next_core_queue_accept(). Set by a render-options update.
 void gpu_next_core_queue_set_flush(struct gpu_next_core *core, bool flush);
 
-// The last virtual PTS handed to pl_queue_update. The draw path records
-// it; the screenshot path reads it back to retrieve the current frame.
-void gpu_next_core_queue_set_last_pts(struct gpu_next_core *core, double pts);
+// Run pl_queue_update for the windowed draw path: clamp the requested
+// virtual PTS up to the first queued frame's PTS when the queue head has
+// not yet reached it (the up-to-half-a-vsync lead described inline),
+// record the resulting PTS as last_pts, then update. current_pts is the
+// front-end's current frame PTS, used only for a diagnostic. Returns the
+// pl_queue status for the caller to act on.
+enum pl_queue_status gpu_next_core_queue_update(struct gpu_next_core *core,
+                                                struct pl_frame_mix *mix,
+                                                struct pl_queue_params *qparams,
+                                                double current_pts);
+
+// The last virtual PTS handed to pl_queue_update (recorded by
+// gpu_next_core_queue_update); the screenshot path reads it back to
+// retrieve the current frame.
 double gpu_next_core_queue_last_pts(struct gpu_next_core *core);
 
 // Render a frame mix into target (the windowed VO's draw_frame path).

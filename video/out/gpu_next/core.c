@@ -245,9 +245,26 @@ void gpu_next_core_queue_set_flush(struct gpu_next_core *core, bool flush)
     core->flush_cache = flush;
 }
 
-void gpu_next_core_queue_set_last_pts(struct gpu_next_core *core, double pts)
+enum pl_queue_status gpu_next_core_queue_update(struct gpu_next_core *core,
+                                                struct pl_frame_mix *mix,
+                                                struct pl_queue_params *qparams,
+                                                double current_pts)
 {
-    core->last_pts = pts;
+    // Depending on the vsync ratio, we may be up to half of the vsync
+    // duration before the current frame time. This works fine because
+    // pl_queue will have this frame, unless it's after a reset event. In
+    // this case, start from the first available frame.
+    struct pl_source_frame first;
+    if (pl_queue_peek(core->queue, 0, &first) && qparams->pts < first.pts) {
+        if (first.pts != current_pts)
+            MP_VERBOSE(core, "Current PTS(%f) != VPTS(%f)\n", current_pts, first.pts);
+        MP_VERBOSE(core, "Clamping first frame PTS from %f to %f\n",
+                   qparams->pts, first.pts);
+        qparams->pts = first.pts;
+    }
+    core->last_pts = qparams->pts;
+
+    return pl_queue_update(core->queue, mix, qparams);
 }
 
 double gpu_next_core_queue_last_pts(struct gpu_next_core *core)

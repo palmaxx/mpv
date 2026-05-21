@@ -986,20 +986,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             .drift_compensation = 0,
         );
 
-        // Depending on the vsync ratio, we may be up to half of the vsync
-        // duration before the current frame time. This works fine because
-        // pl_queue will have this frame, unless it's after a reset event. In
-        // this case, start from the first available frame.
-        struct pl_source_frame first;
-        if (pl_queue_peek(gpu_next_core_queue(p->core), 0, &first) && qparams.pts < first.pts) {
-            if (first.pts != frame->current->pts)
-                MP_VERBOSE(vo, "Current PTS(%f) != VPTS(%f)\n", frame->current->pts, first.pts);
-            MP_VERBOSE(vo, "Clamping first frame PTS from %f to %f\n", qparams.pts, first.pts);
-            qparams.pts = first.pts;
-        }
-        gpu_next_core_queue_set_last_pts(p->core, qparams.pts);
-
-        switch (pl_queue_update(gpu_next_core_queue(p->core), &mix, &qparams)) {
+        switch (gpu_next_core_queue_update(p->core, &mix, &qparams,
+                                           frame->current->pts)) {
         case PL_QUEUE_ERR:
             MP_ERR(vo, "Failed updating frames!\n");
             goto done;
