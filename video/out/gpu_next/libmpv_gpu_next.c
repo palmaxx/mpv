@@ -15,13 +15,30 @@
  * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <string.h>
+
 #include "libmpv_gpu_next.h"
 
 #include "mpv/render.h"
 #include "video/out/libmpv.h"
 
+static const struct libmpv_pl_context_fns *context_backends[] = {
+    // First impl (libmpv_pl_context_gl) lands in the next wiring commit.
+    NULL,
+};
+
 static int init(struct render_backend *ctx, mpv_render_param *params)
 {
+    char *api = get_mpv_render_param(params, MPV_RENDER_PARAM_API_TYPE, NULL);
+    if (!api)
+        return MPV_ERROR_INVALID_PARAMETER;
+
+    for (int n = 0; context_backends[n]; n++) {
+        if (strcmp(context_backends[n]->api_name, api) == 0) {
+            // Backend match; instantiation lands in the next wiring commit.
+            break;
+        }
+    }
     return MPV_ERROR_NOT_IMPLEMENTED;
 }
 
