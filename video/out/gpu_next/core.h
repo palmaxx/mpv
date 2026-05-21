@@ -181,15 +181,17 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 // Sets frame->num_planes and frame->repr.bits. Mirrors how vo_gpu's
 // SW-upload is shared between the windowed VO and libmpv_gpu via
 // gl_video; the libmpv render API (no pl_swapchain) will drive the same
-// entry point.
+// entry point. The upload is self-timed into the core's SW-upload perf
+// counter (gpu_next_core_sw_upload_perf); `ra` is used only to create
+// that timer lazily on the first software frame.
 //
 // Returns false on libplacebo upload failure, in which case mpi and any
 // ref kept for an async upload callback have already been talloc_freed
 // (matching mainline's map_frame failure path); the front-end's outer
-// timer/stats wrapping should be closed and the caller should propagate
-// false back to pl_queue. On success the lifetime contract is the
-// existing one: pl_queue holds the source-frame's mpi ref until unmap,
-// and the additional ref held for the async-callback path is released by
+// stats wrapping should be closed and the caller should propagate false
+// back to pl_queue. On success the lifetime contract is the existing
+// one: pl_queue holds the source-frame's mpi ref until unmap, and the
+// additional ref held for the async-callback path is released by
 // libplacebo when it is done with the buffer.
 //
 // The hwdec branch of map_frame and the per-frame frame_priv plumbing
@@ -197,9 +199,18 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 // front-end and remain hwdec-rig-deferred — lavapipe cannot honestly
 // verify hwdec.
 bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
+                                    struct ra *ra,
                                     struct mp_image *mpi,
                                     pl_tex *tex,
                                     struct pl_frame *frame);
+
+// The most recent SW-upload perf sample, measured by
+// gpu_next_core_upload_sw_planes. Reset (count -> 0) by
+// gpu_next_core_sw_upload_perf_reset, which the front-end calls when a
+// hwdec frame is mapped so a stale SW sample is not reported. Symmetric
+// with gpu_next_core_hwdec_perf / gpu_next_core_hwdec_perf_reset.
+struct mp_pass_perf gpu_next_core_sw_upload_perf(const struct gpu_next_core *core);
+void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core);
 
 // Hwdec interop owned by the core: per-decode ra_hwdec_mapper, its perf
 // timer, and the last perf sample. Mirrors how SW upload moved here --

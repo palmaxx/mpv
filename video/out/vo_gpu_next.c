@@ -103,8 +103,6 @@ struct priv {
     struct ra_ctx *ra_ctx;
     struct gpu_ctx *context;
     struct ra_hwdec_ctx hwdec_ctx;
-    struct timer_pool *sw_upload_timer;
-    struct mp_pass_perf sw_upload_perf;
 
     struct gpu_next_core *core;
 
@@ -524,7 +522,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     }
 
     if (fp->hwdec) {
-        p->sw_upload_perf.count = 0;
+        gpu_next_core_sw_upload_perf_reset(p->core);
 
         struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
         frame->acquire = hwdec_acquire;
@@ -533,15 +531,9 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     } else { // swdec
         gpu_next_core_hwdec_perf_reset(p->core);
 
-        if (!p->sw_upload_timer)
-            p->sw_upload_timer = timer_pool_create(p->ra_ctx->ra);
-
         stats_time_start(p->stats, "swdec-upload");
-        timer_pool_start(p->sw_upload_timer);
-        bool ok = gpu_next_core_upload_sw_planes(p->core, mpi, tex, frame);
-        timer_pool_stop(p->sw_upload_timer);
-        if (ok)
-            p->sw_upload_perf = timer_pool_measure(p->sw_upload_timer);
+        bool ok = gpu_next_core_upload_sw_planes(p->core, p->ra_ctx->ra,
+                                                 mpi, tex, frame);
         stats_time_end(p->stats, "swdec-upload");
         if (!ok)
             return false;
@@ -1522,7 +1514,8 @@ static int control(struct vo *vo, uint32_t request, void *data)
     case VOCTRL_PERFORMANCE_DATA: {
         struct voctrl_performance_data *perf = data;
         struct mp_pass_perf hwdec_perf = gpu_next_core_hwdec_perf(p->core);
-        copy_frame_info_to_mp(&p->perf_fresh, &perf->fresh, &hwdec_perf, &p->sw_upload_perf);
+        struct mp_pass_perf sw_upload_perf = gpu_next_core_sw_upload_perf(p->core);
+        copy_frame_info_to_mp(&p->perf_fresh, &perf->fresh, &hwdec_perf, &sw_upload_perf);
         copy_frame_info_to_mp(&p->perf_redraw, &perf->redraw, NULL, NULL);
         return true;
     }
@@ -1778,8 +1771,6 @@ static void uninit(struct vo *vo)
         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
     // sub_tex recycle pool is owned by the core and freed in
     // gpu_next_core_destroy() above.
-
-    timer_pool_destroy(p->sw_upload_timer);
 
     if (vo->hwdec_devs) {
         // hwdec mappers + timers are owned by core, destroyed above.
