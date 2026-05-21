@@ -39,6 +39,7 @@ struct mpv_global;
 struct pl_hook;
 struct ra;
 struct ra_hwdec;
+struct voctrl_performance_data;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
@@ -118,6 +119,10 @@ double gpu_next_core_queue_last_pts(struct gpu_next_core *core);
 // target back and call gpu_next_core_get_hdr_metadata(). Returns false on
 // libplacebo render failure, in which case the caller clears target
 // itself and the inference is skipped (as in mainline).
+//
+// The core installs its own render-pass perf info callback on the params
+// for this call (read back via gpu_next_core_get_perf_data); the caller
+// does not provide one.
 bool gpu_next_core_render_mix(struct gpu_next_core *core,
                               const struct pl_frame_mix *mix,
                               struct pl_frame *target,
@@ -135,6 +140,15 @@ bool gpu_next_core_render_image(struct gpu_next_core *core,
 // unavailable (non-HDR source or peak detection disabled).
 bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
                                     struct pl_hdr_metadata *metadata);
+
+// Fill *perf with the most recent frame's render-pass timings: the
+// fresh-frame and redraw-frame pl_dispatch_info lists collected by the
+// core's render info callback (installed by gpu_next_core_render_mix),
+// with the hwdec-map and SW-upload samples prepended to the fresh list.
+// Backs vo_driver VOCTRL_PERFORMANCE_DATA and the libmpv render API's
+// perfdata hook.
+void gpu_next_core_get_perf_data(struct gpu_next_core *core,
+                                 struct voctrl_performance_data *perf);
 
 // Wrap pl_renderer_flush_cache(): drop renderer state related to peak
 // detection and frame mixing, which the front-end calls on seek (after
@@ -204,12 +218,10 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
                                     pl_tex *tex,
                                     struct pl_frame *frame);
 
-// The most recent SW-upload perf sample, measured by
-// gpu_next_core_upload_sw_planes. Reset (count -> 0) by
-// gpu_next_core_sw_upload_perf_reset, which the front-end calls when a
-// hwdec frame is mapped so a stale SW sample is not reported. Symmetric
-// with gpu_next_core_hwdec_perf / gpu_next_core_hwdec_perf_reset.
-struct mp_pass_perf gpu_next_core_sw_upload_perf(const struct gpu_next_core *core);
+// Reset the SW-upload perf counter (count -> 0), called when a hwdec
+// frame is mapped so a stale SW sample is not reported. The sample
+// itself (measured by gpu_next_core_upload_sw_planes) is consumed
+// internally by gpu_next_core_get_perf_data.
 void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core);
 
 // Hwdec interop owned by the core: per-decode ra_hwdec_mapper, its perf
@@ -265,13 +277,10 @@ void gpu_next_core_hwdec_release(struct gpu_next_core *core,
 void gpu_next_core_hwdec_el_release(struct gpu_next_core *core,
                                     struct pl_frame *frame);
 
-// Last hwdec-map perf sample (set by the most recent successful
-// gpu_next_core_hwdec_acquire). Returns {0} after
-// gpu_next_core_hwdec_perf_reset() or before the first hwdec frame.
-struct mp_pass_perf gpu_next_core_hwdec_perf(const struct gpu_next_core *core);
-
-// Reset the hwdec perf counter, matching the windowed VO's reset at
-// SW-frame map time.
+// Reset the hwdec-map perf counter, called when a SW frame is mapped so
+// a stale hwdec sample is not reported. The sample itself (set by the
+// most recent successful gpu_next_core_hwdec_acquire) is consumed
+// internally by gpu_next_core_get_perf_data.
 void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core);
 
 // Map the mpv scaler option for the given unit to a libplacebo filter

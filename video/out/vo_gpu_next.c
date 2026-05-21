@@ -82,11 +82,6 @@ struct user_lut {
     struct pl_custom_lut *lut;
 };
 
-struct frame_info {
-    int count;
-    struct pl_dispatch_info info[VO_PASS_PERF_MAX];
-};
-
 struct cache {
     struct mp_log *log;
     struct mpv_global *global;
@@ -134,10 +129,6 @@ struct priv {
     struct pl_icc_params icc_params;
     char *icc_path;
     pl_icc_object icc_profile;
-
-    // Performance data of last frame
-    struct frame_info perf_fresh;
-    struct frame_info perf_redraw;
 
     struct mp_image_params target_params;
 };
@@ -622,24 +613,6 @@ static void discard_frame(const struct pl_source_frame *src)
     talloc_free(mpi);
 }
 
-static void info_callback(void *priv, const struct pl_render_info *info)
-{
-    struct vo *vo = priv;
-    struct priv *p = vo->priv;
-    if (info->index >= VO_PASS_PERF_MAX)
-        return; // silently ignore clipped passes, whatever
-
-    struct frame_info *frame;
-    switch (info->stage) {
-    case PL_RENDER_STAGE_FRAME: frame = &p->perf_fresh; break;
-    case PL_RENDER_STAGE_BLEND: frame = &p->perf_redraw; break;
-    default: abort();
-    }
-
-    frame->count = info->index + 1;
-    pl_dispatch_info_move(&frame->info[info->index], info->pass);
-}
-
 static void update_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -812,8 +785,6 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     bool can_interpolate = opts->interpolation && frame->display_synced &&
                            !frame->still && frame->num_frames > 1 && !p->paused;
     double pts_offset = can_interpolate ? frame->ideal_frame_vsync : 0;
-    params.info_callback = info_callback;
-    params.info_priv = vo;
     params.skip_caching_single_frame = !cache_frame;
     params.preserve_mixing_cache = p->next_opts->inter_preserve && !frame->still;
     if (frame->still || p->paused)
@@ -1405,51 +1376,6 @@ done:
     pl_tex_destroy(gpu, &fbo);
 }
 
-static inline void copy_frame_info_to_mp(struct frame_info *pl,
-                                         struct mp_frame_perf *mp,
-                                         struct mp_pass_perf *hwdec_perf,
-                                         struct mp_pass_perf *sw_upload_perf)
-{
-    static_assert(MP_ARRAY_SIZE(pl->info) == MP_ARRAY_SIZE(mp->perf), "");
-    mp_assert(pl->count <= VO_PASS_PERF_MAX);
-
-    struct mp_pass_perf *perf = mp->perf;
-    char (*desc)[VO_PASS_DESC_MAX_LEN] = mp->desc;
-    struct mp_pass_perf *perf_end = perf + VO_PASS_PERF_MAX;
-
-    if (hwdec_perf && hwdec_perf->count > 0) {
-        *perf++ = *hwdec_perf;
-        snprintf(*desc, sizeof(*desc), "map frame (hwdec)");
-        desc++;
-    }
-
-    if (sw_upload_perf && sw_upload_perf->count > 0) {
-        *perf++ = *sw_upload_perf;
-        snprintf(*desc, sizeof(*desc), "upload frame");
-        desc++;
-    }
-
-    for (int i = 0; i < pl->count && perf < perf_end; ++i) {
-        const struct pl_dispatch_info *pass = &pl->info[i];
-
-        static_assert(VO_PERF_SAMPLE_COUNT >= MP_ARRAY_SIZE(pass->samples), "");
-        mp_assert(pass->num_samples <= MP_ARRAY_SIZE(pass->samples));
-
-        perf->count = MPMIN(pass->num_samples, VO_PERF_SAMPLE_COUNT);
-        memcpy(perf->samples, pass->samples, perf->count * sizeof(pass->samples[0]));
-        perf->last = pass->last;
-        perf->peak = pass->peak;
-        perf->avg = pass->average;
-
-        strncpy(*desc, pass->shader->description, sizeof(*desc) - 1);
-        (*desc)[sizeof(*desc) - 1] = '\0';
-        perf++;
-        desc++;
-    }
-
-    mp->count = perf - mp->perf;
-}
-
 static void update_ra_ctx_options(struct vo *vo, struct ra_ctx_opts *ctx_opts)
 {
     struct priv *p = vo->priv;
@@ -1511,14 +1437,9 @@ static int control(struct vo *vo, uint32_t request, void *data)
         gpu_next_core_queue_request_reset(p->core);
         return VO_TRUE;
 
-    case VOCTRL_PERFORMANCE_DATA: {
-        struct voctrl_performance_data *perf = data;
-        struct mp_pass_perf hwdec_perf = gpu_next_core_hwdec_perf(p->core);
-        struct mp_pass_perf sw_upload_perf = gpu_next_core_sw_upload_perf(p->core);
-        copy_frame_info_to_mp(&p->perf_fresh, &perf->fresh, &hwdec_perf, &sw_upload_perf);
-        copy_frame_info_to_mp(&p->perf_redraw, &perf->redraw, NULL, NULL);
+    case VOCTRL_PERFORMANCE_DATA:
+        gpu_next_core_get_perf_data(p->core, data);
         return true;
-    }
 
     case VOCTRL_SCREENSHOT:
         video_screenshot(vo, data);
@@ -1785,11 +1706,6 @@ static void uninit(struct vo *vo)
     // image_lut/lut/target_lut pl_lut pointers are not owned here -- they
     // are borrowed from the core's LUT cache (freed by core_destroy above).
     pl_icc_close(&p->icc_profile);
-
-    for (int i = 0; i < VO_PASS_PERF_MAX; ++i) {
-        pl_shader_info_deref(&p->perf_fresh.info[i].shader);
-        pl_shader_info_deref(&p->perf_redraw.info[i].shader);
-    }
 
     p->ra_ctx = NULL;
     p->pllog = NULL;
