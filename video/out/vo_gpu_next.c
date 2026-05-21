@@ -347,75 +347,6 @@ static void update_overlays(struct vo *vo, struct mp_osd_res res,
     talloc_free(subs);
 }
 
-static void setup_hwdec_plane_mapping(struct pl_frame *frame,
-                                      const struct mp_imgfmt_desc *desc)
-{
-    frame->num_planes = desc->num_planes;
-    for (int n = 0; n < frame->num_planes; n++) {
-        struct pl_plane *plane = &frame->planes[n];
-        int *map = plane->component_mapping;
-        for (int c = 0; c < mp_imgfmt_desc_get_num_comps(desc); c++) {
-            if (desc->comps[c].plane != n)
-                continue;
-            // Sort by component offset
-            uint8_t offset = desc->comps[c].offset;
-            int index = plane->components++;
-            while (index > 0 && desc->comps[map[index - 1]].offset > offset) {
-                map[index] = map[index - 1];
-                index--;
-            }
-            map[index] = c;
-        }
-    }
-}
-
-static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->vo->priv;
-    if (!gpu_next_core_hwdec_reconfig(p->core, p->ra_ctx->ra, fp->hwdec,
-                                      &mpi->params))
-        return false;
-
-    stats_time_start(p->stats, "hwdec-map");
-    bool ok = gpu_next_core_hwdec_acquire(p->core, mpi, frame);
-    stats_time_end(p->stats, "hwdec-map");
-    return ok;
-}
-
-static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->vo->priv;
-    gpu_next_core_hwdec_release(p->core, frame);
-}
-
-#if PL_API_VER >= 367
-static bool hwdec_acquire_el(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *bl_mpi = frame->user_data;
-    struct mp_image *el_mpi = bl_mpi->enhancement_layer;
-    struct frame_priv *fp = bl_mpi->priv;
-    struct priv *p = fp->vo->priv;
-    if (!gpu_next_core_hwdec_el_reconfig(p->core, p->ra_ctx->ra, fp->el_hwdec,
-                                         &el_mpi->params))
-        return false;
-
-    return gpu_next_core_hwdec_el_acquire(p->core, el_mpi, frame);
-}
-
-static void hwdec_release_el(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *bl_mpi = frame->user_data;
-    struct frame_priv *fp = bl_mpi->priv;
-    struct priv *p = fp->vo->priv;
-    gpu_next_core_hwdec_el_release(p->core, frame);
-}
-#endif
-
-
 // Effective reference white luminance in nits to assume for SDR content.
 static float get_ref_luma(struct priv *p)
 {
@@ -442,159 +373,6 @@ static bool use_ref_luma(const struct pl_color_space *csp, const struct pl_color
     return false;
 }
 
-static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src,
-                      struct pl_frame *frame)
-{
-    struct mp_image *mpi = src->frame_data;
-    struct mp_image_params par = mpi->params;
-    struct frame_priv *fp = mpi->priv;
-    struct vo *vo = fp->vo;
-    struct priv *p = vo->priv;
-
-    fp->hwdec = ra_hwdec_get(&p->hwdec_ctx, mpi->imgfmt);
-    if (fp->hwdec) {
-        // Note: We don't actually need the mapper to map the frame yet, we
-        // only reconfig the mapper here (potentially creating it) to access
-        // `dst_params`. In practice, though, this should not matter unless the
-        // image format changes mid-stream.
-        if (!gpu_next_core_hwdec_reconfig(p->core, p->ra_ctx->ra, fp->hwdec,
-                                          &mpi->params)) {
-            talloc_free(mpi);
-            return false;
-        }
-
-        par = *gpu_next_core_hwdec_dst_params(p->core);
-    }
-
-    mp_image_params_guess_csp(&par);
-
-    *frame = (struct pl_frame) {
-        .color = par.color,
-        .repr = par.repr,
-        .profile = {
-            .data = mpi->icc_profile ? mpi->icc_profile->data : NULL,
-            .len = mpi->icc_profile ? mpi->icc_profile->size : 0,
-        },
-        .rotation = par.rotate / 90,
-        .user_data = mpi,
-    };
-
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    float ref_luma;
-    if (!pl_color_transfer_is_hdr(frame->color.transfer) && (ref_luma = get_ref_luma(p)))
-        frame->color.hdr.max_luma = ref_luma;
-
-    if (opts->treat_srgb_as_power22 & 1 && frame->color.transfer == PL_COLOR_TRC_SRGB) {
-        // The sRGB EOTF is a pure gamma 2.2 function. See reference display in
-        // IEC 61966-2-1-1999. Linearize sRGB to display light.
-        frame->color.transfer = PL_COLOR_TRC_GAMMA22;
-    }
-
-    if (fp->hwdec) {
-        gpu_next_core_sw_upload_perf_reset(p->core);
-
-        struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
-        frame->acquire = hwdec_acquire;
-        frame->release = hwdec_release;
-        setup_hwdec_plane_mapping(frame, &desc);
-    } else { // swdec
-        gpu_next_core_hwdec_perf_reset(p->core);
-
-        stats_time_start(p->stats, "swdec-upload");
-        bool ok = gpu_next_core_upload_sw_planes(p->core, p->ra_ctx->ra,
-                                                 mpi, tex, frame);
-        stats_time_end(p->stats, "swdec-upload");
-        if (!ok)
-            return false;
-    }
-
-    // Update chroma location, must be done after initializing planes
-    pl_frame_set_chroma_location(frame, par.chroma_location);
-
-#if PL_API_VER >= 367
-    if (mpi->enhancement_layer) {
-        struct mp_image *el = mpi->enhancement_layer;
-        fp->el_hwdec = ra_hwdec_get(&p->hwdec_ctx, el->imgfmt);
-
-        struct mp_image_params el_par = el->params;
-        bool el_ok = true;
-        if (fp->el_hwdec) {
-            if (gpu_next_core_hwdec_el_reconfig(p->core, p->ra_ctx->ra,
-                                                fp->el_hwdec, &el->params)) {
-                el_par = *gpu_next_core_hwdec_el_dst_params(p->core);
-            } else {
-                fp->el_hwdec = NULL;
-                el_ok = false;
-            }
-        }
-        mp_image_params_guess_csp(&el_par);
-
-        fp->el_frame = (struct pl_frame) {
-            .color = el_par.color,
-            .repr  = el_par.repr,
-            .user_data = mpi, // BL mpi
-        };
-
-        if (el_ok && fp->el_hwdec) {
-            struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(el_par.imgfmt);
-            fp->el_frame.acquire = hwdec_acquire_el;
-            fp->el_frame.release = hwdec_release_el;
-            setup_hwdec_plane_mapping(&fp->el_frame, &desc);
-        } else if (el_ok) {
-            el_ok = gpu_next_core_upload_sw_planes(p->core, el, fp->el_tex, &fp->el_frame);
-        }
-
-        if (el_ok) {
-            pl_frame_set_chroma_location(&fp->el_frame, el_par.chroma_location);
-            frame->enhancement_layer = &fp->el_frame;
-        } else {
-            MP_WARN(vo, "Failed setting up enhancement layer; "
-                    "rendering base layer only.\n");
-        }
-    }
-#endif
-
-    if (mpi->film_grain)
-        pl_film_grain_from_av(&frame->film_grain, (AVFilmGrainParams *) mpi->film_grain->data);
-
-    // Compute a unique signature for any attached ICC profile. Wasteful in
-    // theory if the ICC profile is the same for multiple frames, but in
-    // practice ICC profiles are overwhelmingly going to be attached to
-    // still images so it shouldn't matter.
-    pl_icc_profile_compute_signature(&frame->profile);
-
-    // Update LUT attached to this frame
-    update_lut(p, &p->next_opts->image_lut);
-    frame->lut = p->next_opts->image_lut.lut;
-    frame->lut_type = p->next_opts->image_lut.type;
-    return true;
-}
-
-<<<<<<< HEAD
-static void unmap_frame(pl_gpu gpu, struct pl_frame *frame,
-                        const struct pl_source_frame *src)
-{
-    struct mp_image *mpi = src->frame_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->vo->priv;
-    for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++)
-        gpu_next_core_sub_tex_push(p->core, fp->subs.entries[i].tex);
-    for (int i = 0; i < MP_ARRAY_SIZE(fp->el_tex); i++) {
-        if (fp->el_tex[i])
-            pl_tex_destroy(gpu, &fp->el_tex[i]);
-    }
-    talloc_free(mpi);
-}
-
-static void discard_frame(const struct pl_source_frame *src)
-{
-    struct mp_image *mpi = src->frame_data;
-    talloc_free(mpi);
-}
-
-=======
->>>>>>> 1fb43bfe00 (vo_gpu_next: move frame_priv + unmap/discard into gpu_next/core (E5.2)
-)
 static void update_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -804,13 +582,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
         mpi->priv = fp;
         fp->core = p->core;
-        fp->vo = vo;
 
         pl_queue_push(gpu_next_core_queue(p->core), &(struct pl_source_frame) {
             .pts = mpi->pts,
             .duration = can_interpolate ? frame->approx_duration : 0,
             .frame_data = mpi,
-            .map = map_frame,
+            .map = gpu_next_core_map_frame,
             .unmap = gpu_next_core_unmap_frame,
             .discard = gpu_next_core_discard_frame,
         });

@@ -40,7 +40,6 @@ struct mpv_global;
 struct pl_hook;
 struct ra;
 struct ra_hwdec;
-struct vo;
 struct voctrl_performance_data;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
@@ -125,12 +124,8 @@ struct frame_priv {
     // Back-reference to the owning core, set by the front-end at push.
     struct gpu_next_core *core;
 
-    // TRANSITIONAL: still needed by the VO-side map_frame and the hwdec
-    // acquire/release shims; removed once map_frame moves into the core.
-    struct vo *vo;
-
     // hwdec resolved for this frame (NULL for software frames), looked
-    // up in map_frame.
+    // up by gpu_next_core_map_frame.
     struct ra_hwdec *hwdec;
     // Optional Dolby Vision FEL.
     struct ra_hwdec *el_hwdec;
@@ -143,14 +138,26 @@ struct frame_priv {
     uint64_t osd_sync;
 };
 
-// pl_queue unmap/discard callbacks owned by the core. The front-end's
-// push loop installs these on the pl_source_frame; centralising them
-// (with map_frame, in a later step) gives the libmpv render backend the
-// exact same frame-ingest path with zero callback duplication.
+// pl_queue map/unmap/discard callbacks owned by the core. The front-end's
+// push loop installs all three on the pl_source_frame; centralising them
+// gives the libmpv render backend the exact same frame-ingest path with
+// zero callback duplication.
+//
+// map turns an mpv source frame into a pl_frame: it resolves hwdec via
+// the front-end interface, builds the pl_frame colorspace/representation
+// (applying the hdr-reference-white and treat-srgb-as-power22 option
+// tweaks), then either uploads the software planes
+// (gpu_next_core_upload_sw_planes, wrapped in the front-end's
+// "swdec-upload" timer) or sets up the hwdec planes with the core's own
+// acquire/release callbacks, and attaches the resolved image LUT. On
+// failure it frees mpi and returns false (mainline's map_frame contract).
 //
 // unmap returns the frame's OSD overlay textures to the core's sub_tex
 // recycle pool and frees the mp_image; discard (a frame dropped before
 // it was ever mapped) just frees the mp_image.
+bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
+                             const struct pl_source_frame *src,
+                             struct pl_frame *frame);
 void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
                                const struct pl_source_frame *src);
 void gpu_next_core_discard_frame(const struct pl_source_frame *src);
