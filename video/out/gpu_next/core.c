@@ -977,6 +977,22 @@ pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core)
     return tex;
 }
 
+void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
+                               const struct pl_source_frame *src)
+{
+    struct mp_image *mpi = src->frame_data;
+    struct frame_priv *fp = mpi->priv;
+    for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++)
+        gpu_next_core_sub_tex_push(fp->core, fp->subs.entries[i].tex);
+    talloc_free(mpi);
+}
+
+void gpu_next_core_discard_frame(const struct pl_source_frame *src)
+{
+    struct mp_image *mpi = src->frame_data;
+    talloc_free(mpi);
+}
+
 void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
                                             const struct mp_image *mpi)
 {
