@@ -24,6 +24,7 @@
 #include "common/msg.h"
 #include "core.h"
 #include "libmpv_gpu_next.h"
+#include "misc/bstr.h"
 #include "mpv/render.h"
 #include "options/m_config.h"
 #include "ta/ta_talloc.h"
@@ -63,6 +64,20 @@ struct priv {
     struct mp_rect src, dst;
     struct mp_osd_res osd_res;
 };
+
+// Per-draw / per-screenshot option resolution, mirroring the windowed VO's
+// update_options. update_external() handles the vo_set_queue_params side
+// (which needs a vo pointer); this helper covers the rest.
+static void update_options(struct priv *p)
+{
+    bool changed = m_config_cache_update(p->opts_cache);
+    changed = m_config_cache_update(p->next_opts_cache) || changed;
+    if (changed) {
+        gpu_next_core_update_render_options(p->core, p->opts_cache->opts,
+                                           p->next_opts, false);
+    }
+    gpu_next_core_update_options(p->core, p->opts_cache->opts, p->next_opts);
+}
 
 static int init(struct render_backend *ctx, mpv_render_param *params)
 {
@@ -130,8 +145,22 @@ static bool check_format(struct render_backend *ctx, int imgfmt)
 
 static int set_parameter(struct render_backend *ctx, mpv_render_param param)
 {
-    // ICC profile / ambient light are W6 optional hooks.
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    struct priv *p = ctx->priv;
+
+    switch (param.type) {
+    case MPV_RENDER_PARAM_ICC_PROFILE: {
+        mpv_byte_array *data = param.data;
+        gpu_next_core_update_icc(p->core,
+                                 bstrdup(NULL, (bstr){data->data, data->size}));
+        return 0;
+    }
+    case MPV_RENDER_PARAM_AMBIENT_LIGHT:
+        // libplacebo has no direct ambient-lux input; the documented
+        // replacement is the gamma-auto.lua script.
+        return MPV_ERROR_NOT_IMPLEMENTED;
+    default:
+        return MPV_ERROR_NOT_IMPLEMENTED;
+    }
 }
 
 static void reconfig(struct render_backend *ctx, struct mp_image_params *params)
@@ -210,16 +239,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     int depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0);
     bool flip = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y, int, 0);
 
-    // Resolve options, mirroring the windowed VO's update_options(): the
-    // queue-depth side (vo_set_queue_params) needs a vo and is handled in
-    // update_external() instead.
-    bool changed = m_config_cache_update(p->opts_cache);
-    changed = m_config_cache_update(p->next_opts_cache) || changed;
-    if (changed) {
-        gpu_next_core_update_render_options(p->core, p->opts_cache->opts,
-                                           p->next_opts, false);
-    }
-    gpu_next_core_update_options(p->core, p->opts_cache->opts, p->next_opts);
+    update_options(p);
 
     struct pl_render_params rparams = pars->params;
     const struct gl_video_opts *opts = p->opts_cache->opts;
@@ -334,6 +354,31 @@ done:
     return 0;
 }
 
+static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,
+                                  int w, int h, int stride_align, int flags)
+{
+    struct priv *p = ctx->priv;
+    return gpu_next_core_get_image(p->core, imgfmt, w, h, stride_align, flags);
+}
+
+static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
+                       struct voctrl_screenshot *args)
+{
+    struct priv *p = ctx->priv;
+    update_options(p);
+    // The render backend has no swapchain (fallback_depth = 0) and no
+    // ra_ctx (want_alpha = false).
+    gpu_next_core_screenshot(p->core, args, p->src, p->dst, p->osd_res,
+                             0, false, &p->osd_state);
+}
+
+static void perfdata(struct render_backend *ctx,
+                     struct voctrl_performance_data *out)
+{
+    struct priv *p = ctx->priv;
+    gpu_next_core_get_perf_data(p->core, out);
+}
+
 static void destroy(struct render_backend *ctx)
 {
     struct priv *p = ctx->priv;
@@ -370,5 +415,8 @@ const struct render_backend_fns render_backend_gpu_next = {
     .resize = resize,
     .get_target_size = get_target_size,
     .render = render,
+    .get_image = get_image,
+    .screenshot = screenshot,
+    .perfdata = perfdata,
     .destroy = destroy,
 };
