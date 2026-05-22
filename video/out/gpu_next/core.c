@@ -169,6 +169,12 @@ struct gpu_next_core {
     char *icc_path;
     pl_icc_object icc_profile;
 
+    // Software-side colour adjustment: the equalizer state (brightness /
+    // contrast / hue / saturation / gamma, watched off the option system)
+    // and the output colour levels last resolved from it.
+    struct mp_csp_equalizer_state *video_eq;
+    enum pl_color_levels output_levels;
+
     pl_options pars;
     pl_renderer rr;
     pl_queue queue;
@@ -449,6 +455,7 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
     core->pllog = pllog;
     core->log = log;
     core->global = global;
+    core->video_eq = mp_csp_equalizer_create(core, global);
     core->pars = pl_options_alloc(pllog);
 
     // Set up the on-disk object caches and install the shader cache on the
@@ -1868,6 +1875,63 @@ AV_NOWARN_DEPRECATED(
 
     MP_DBG(core, "Render options updated, flushing renderer cache.\n");
     gpu_next_core_queue_set_flush(core, paused || !next_opts->inter_preserve);
+}
+
+void gpu_next_core_update_lut(struct gpu_next_core *core, struct user_lut *lut)
+{
+    if (!lut->opt || !lut->opt[0]) {
+        lut->lut = NULL;
+        TA_FREEP(&lut->path);
+        return;
+    }
+
+    if (lut->path && strcmp(lut->path, lut->opt) == 0)
+        return; // no change
+
+    // The path tracker (lut->path) lives in the user_lut, which sits in
+    // the front-end's gl_next_opts m_config_cache buffer; the front-end's
+    // VOCTRL_UPDATE_RENDER_OPTS compares it to request a queue reset on an
+    // --image-lut change. The LUT itself is loaded and cached by the core
+    // (one shared cache across the image/lut/target_lut call sites).
+    talloc_replace(core, lut->path, lut->opt);
+    lut->lut = gpu_next_core_load_lut(core, core->global, lut->opt);
+}
+
+void gpu_next_core_update_options(struct gpu_next_core *core,
+                                  const struct gl_video_opts *opts,
+                                  struct gl_next_opts *next_opts)
+{
+    pl_options pars = core->pars;
+
+    gpu_next_core_update_lut(core, &next_opts->lut);
+    pars->params.lut = next_opts->lut.lut;
+    pars->params.lut_type = next_opts->lut.type;
+
+    // Resolve the image LUT and hand it to the core's map callback, which
+    // applies it per source frame. An --image-lut change forces a queue
+    // reset (the front-end's VOCTRL_UPDATE_RENDER_OPTS), so no in-flight
+    // frame can straddle a change.
+    gpu_next_core_update_lut(core, &next_opts->image_lut);
+    gpu_next_core_set_image_lut(core, next_opts->image_lut.lut,
+                                next_opts->image_lut.type);
+
+    // Update equalizer state
+    struct mp_csp_params cparams = MP_CSP_PARAMS_DEFAULTS;
+    mp_csp_equalizer_state_get(core->video_eq, &cparams);
+    pars->color_adjustment.brightness = cparams.brightness;
+    pars->color_adjustment.contrast = cparams.contrast;
+    pars->color_adjustment.hue = cparams.hue;
+    pars->color_adjustment.saturation = cparams.saturation;
+    pars->color_adjustment.gamma = cparams.gamma * opts->gamma;
+    core->output_levels = cparams.levels_out;
+
+    for (char **kv = next_opts->raw_opts; kv && kv[0]; kv += 2)
+        pl_options_set_str(pars, kv[0], kv[1]);
+}
+
+enum pl_color_levels gpu_next_core_output_levels(struct gpu_next_core *core)
+{
+    return core->output_levels;
 }
 
 static void update_hook_opts_dynamic(const struct pl_hook *hook,

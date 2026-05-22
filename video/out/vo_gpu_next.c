@@ -87,14 +87,11 @@ struct priv {
     struct m_config_cache *opts_cache;
     struct m_config_cache *next_opts_cache;
     struct gl_next_opts *next_opts;
-    struct mp_csp_equalizer_state *video_eq;
-    enum pl_color_levels output_levels;
 
     struct mp_image_params target_params;
 };
 
 static void update_render_options(struct vo *vo);
-static void update_lut(struct priv *p, struct user_lut *lut);
 
 static struct mp_image *get_image(struct vo *vo, int imgfmt, int w, int h,
                                   int stride_align, int flags)
@@ -281,37 +278,12 @@ static bool use_ref_luma(const struct pl_color_space *csp, const struct pl_color
 static void update_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    pl_options pars = gpu_next_core_options(p->core);
     bool changed = m_config_cache_update(p->opts_cache);
     changed = m_config_cache_update(p->next_opts_cache) || changed;
     if (changed)
         update_render_options(vo);
 
-    update_lut(p, &p->next_opts->lut);
-    pars->params.lut = p->next_opts->lut.lut;
-    pars->params.lut_type = p->next_opts->lut.type;
-
-    // Resolve the image LUT and hand it to the core; the core's map
-    // callback applies it per source frame. An --image-lut change forces a
-    // queue reset (VOCTRL_UPDATE_RENDER_OPTS), so no in-flight frame can
-    // straddle a change.
-    update_lut(p, &p->next_opts->image_lut);
-    gpu_next_core_set_image_lut(p->core, p->next_opts->image_lut.lut,
-                               p->next_opts->image_lut.type);
-
-    // Update equalizer state
-    struct mp_csp_params cparams = MP_CSP_PARAMS_DEFAULTS;
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    mp_csp_equalizer_state_get(p->video_eq, &cparams);
-    pars->color_adjustment.brightness = cparams.brightness;
-    pars->color_adjustment.contrast = cparams.contrast;
-    pars->color_adjustment.hue = cparams.hue;
-    pars->color_adjustment.saturation = cparams.saturation;
-    pars->color_adjustment.gamma = cparams.gamma * opts->gamma;
-    p->output_levels = cparams.levels_out;
-
-    for (char **kv = p->next_opts->raw_opts; kv && kv[0]; kv += 2)
-        pl_options_set_str(pars, kv[0], kv[1]);
+    gpu_next_core_update_options(p->core, p->opts_cache->opts, p->next_opts);
 }
 
 static void apply_target_contrast(struct priv *p, struct pl_color_space *color, float min_luma)
@@ -323,15 +295,16 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
                                  float min_luma, bool hint, float target_ref_luma,
                                  const struct pl_color_space *target_csp)
 {
-    update_lut(p, &p->next_opts->target_lut);
+    gpu_next_core_update_lut(p->core, &p->next_opts->target_lut);
     target->lut = p->next_opts->target_lut.lut;
     target->lut_type = p->next_opts->target_lut.type;
 
     // Colorspace overrides
     const struct gl_video_opts *opts = p->opts_cache->opts;
     // If swapchain returned a value use this, override is used in hint
-    if (p->output_levels)
-        target->repr.levels = p->output_levels;
+    enum pl_color_levels output_levels = gpu_next_core_output_levels(p->core);
+    if (output_levels)
+        target->repr.levels = output_levels;
     if (opts->target_prim && (!target->color.primaries || !hint))
         target->color.primaries = opts->target_prim;
     if (opts->target_trc && (!target->color.transfer || !hint))
@@ -368,12 +341,13 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
 static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
 {
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
+    enum pl_color_levels output_levels = gpu_next_core_output_levels(p->core);
 
     struct mp_image_params params = {
         .color = hint ? *hint : pl_color_space_srgb,
         .repr = {
             .sys = PL_COLOR_SYSTEM_RGB,
-            .levels = p->output_levels ? p->output_levels : PL_COLOR_LEVELS_FULL,
+            .levels = output_levels ? output_levels : PL_COLOR_LEVELS_FULL,
             .alpha = p->ra_ctx->opts.want_alpha ? PL_ALPHA_INDEPENDENT : PL_ALPHA_NONE,
         },
     };
@@ -1136,7 +1110,6 @@ static int preinit(struct vo *vo)
     p->opts_cache = m_config_cache_alloc(p, vo->global, &gl_video_conf);
     p->next_opts_cache = m_config_cache_alloc(p, vo->global, &gl_next_conf);
     p->next_opts = p->next_opts_cache->opts;
-    p->video_eq = mp_csp_equalizer_create(p, vo->global);
     p->global = vo->global;
     p->log = vo->log;
     p->stats = stats_ctx_create(p, vo->global, "vo/gpu-next");
@@ -1185,25 +1158,6 @@ static int preinit(struct vo *vo)
 err_out:
     uninit(vo);
     return -1;
-}
-
-static void update_lut(struct priv *p, struct user_lut *lut)
-{
-    if (!lut->opt || !lut->opt[0]) {
-        lut->lut = NULL;
-        TA_FREEP(&lut->path);
-        return;
-    }
-
-    if (lut->path && strcmp(lut->path, lut->opt) == 0)
-        return; // no change
-
-    // Path tracker stays on the VO side so VOCTRL_UPDATE_RENDER_OPTS's
-    // queue-reset request (opt-vs-path compare) keeps working; the LUT
-    // itself is loaded and cached by the core (one shared cache across
-    // the image/lut/target_lut call sites).
-    talloc_replace(p, lut->path, lut->opt);
-    lut->lut = gpu_next_core_load_lut(p->core, p->global, lut->opt);
 }
 
 static void update_render_options(struct vo *vo)
