@@ -552,6 +552,28 @@ void gpu_next_core_update_render_options(struct gpu_next_core *core,
                                          const struct gl_next_opts *next_opts,
                                          bool paused);
 
+// Resolve a user LUT option (--lut / --image-lut / --target-lut): when
+// its path changed, (re)load the LUT through the core's shared LUT cache
+// and update the user_lut's path tracker. The front-end calls this
+// directly only for the target LUT (in its target-frame setup);
+// gpu_next_core_update_options handles the main and image LUTs.
+void gpu_next_core_update_lut(struct gpu_next_core *core, struct user_lut *lut);
+
+// Resolve the per-draw gpu-next options into the core's pl_options: the
+// main / image LUTs, the colour-equalizer adjustment and the
+// libplacebo-opts raw passthrough. The front-end calls this every draw,
+// after running gpu_next_core_update_render_options when its option
+// caches report a change. next_opts is mutated (the LUT path trackers).
+void gpu_next_core_update_options(struct gpu_next_core *core,
+                                  const struct gl_video_opts *opts,
+                                  struct gl_next_opts *next_opts);
+
+// The output colour levels resolved from the equalizer by the last
+// gpu_next_core_update_options (PL_COLOR_LEVELS_UNKNOWN until the first
+// one). The front-end reads this back when building its swapchain
+// colorspace hint and render target.
+enum pl_color_levels gpu_next_core_output_levels(struct gpu_next_core *core);
+
 // Refresh every active hook's named parameters that have an auto-source
 // (gpu_get_auto_param in video/out/gpu/utils.c -- PTS, chroma_offset_*,
 // HDR fields) from the current frame. The front-end calls this once per
