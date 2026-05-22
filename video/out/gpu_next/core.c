@@ -2267,6 +2267,52 @@ static bool use_ref_luma(const struct pl_color_space *csp,
     return false;
 }
 
+void gpu_next_core_apply_target_options(struct gpu_next_core *core,
+                                        struct pl_frame *target,
+                                        float min_luma, bool hint,
+                                        float target_ref_luma,
+                                        const struct pl_color_space *target_csp,
+                                        int fallback_depth)
+{
+    const struct gl_video_opts *opts = core->fe.opts;
+
+    gpu_next_core_update_lut(core, &core->fe.next_opts->target_lut);
+    target->lut = core->fe.next_opts->target_lut.lut;
+    target->lut_type = core->fe.next_opts->target_lut.type;
+
+    enum pl_color_levels output_levels = gpu_next_core_output_levels(core);
+    if (output_levels)
+        target->repr.levels = output_levels;
+    if (opts->target_prim && (!target->color.primaries || !hint))
+        target->color.primaries = opts->target_prim;
+    if (opts->target_trc && (!target->color.transfer || !hint))
+        target->color.transfer = opts->target_trc;
+    if (opts->target_peak && (!target->color.hdr.max_luma || !hint))
+        target->color.hdr.max_luma = opts->target_peak;
+    if (target_ref_luma && (!target->color.hdr.max_luma || !hint) &&
+        use_ref_luma(&target->color, target_csp))
+        target->color.hdr.max_luma = target_ref_luma;
+    if ((!target->color.hdr.min_luma || !hint))
+        gpu_next_core_apply_target_contrast(opts, &target->color, min_luma);
+    if (opts->target_gamut)
+        mp_parse_raw_primaries(mp_null_log, opts->target_gamut, &target->color.hdr.prim);
+
+    int dither_depth = opts->dither_depth;
+    if (dither_depth == 0)
+        dither_depth = fallback_depth;
+#if PL_API_VER >= 362
+    if (target->color.transfer == PL_COLOR_TRC_SCRGB)
+        dither_depth = -1;
+#endif
+    if (dither_depth > 0) {
+        struct pl_bit_encoding *tbits = &target->repr.bits;
+        tbits->color_depth += dither_depth - tbits->sample_depth;
+        tbits->sample_depth = dither_depth;
+    }
+
+    gpu_next_core_apply_target_icc(core, target, opts->icc_opts->icc_use_luma);
+}
+
 enum target_hint_action gpu_next_core_target_hint(
     struct gpu_next_core *core,
     const struct gl_video_opts *opts, int target_hint, int target_hint_mode,
