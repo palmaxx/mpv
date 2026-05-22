@@ -472,29 +472,6 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
     target->icc = p->icc_profile;
 }
 
-static void apply_crop(struct pl_frame *frame, struct mp_rect crop,
-                       int width, int height)
-{
-    frame->crop = (struct pl_rect2df) {
-        .x0 = crop.x0,
-        .y0 = crop.y0,
-        .x1 = crop.x1,
-        .y1 = crop.y1,
-    };
-
-    // mpv gives us rotated/flipped rects, libplacebo expects unrotated
-    pl_rect2df_rotate(&frame->crop, -frame->rotation);
-    if (frame->crop.x1 < frame->crop.x0) {
-        frame->crop.x0 = width - frame->crop.x0;
-        frame->crop.x1 = width - frame->crop.x1;
-    }
-
-    if (frame->crop.y1 < frame->crop.y0) {
-        frame->crop.y0 = height - frame->crop.y0;
-        frame->crop.y1 = height - frame->crop.y1;
-    }
-}
-
 static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
 {
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
@@ -703,7 +680,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                     PL_OVERLAY_COORDS_DST_FRAME, &p->osd_state, &target, frame->current,
                     frame->current ? frame->current->params.stereo3d : 0);
     stats_time_end(p->stats, "osd-update");
-    apply_crop(&target, p->dst, swframe.fbo->params.w, swframe.fbo->params.h);
+    gpu_next_core_apply_crop(&target, p->dst, swframe.fbo->params.w,
+                             swframe.fbo->params.h);
     update_tm_viz(&pars->color_map_params, &target);
 
     struct pl_frame_mix mix = {0};
@@ -742,7 +720,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             struct pl_frame *image = (struct pl_frame *) mix.frames[i];
             struct mp_image *mpi = image->user_data;
             struct frame_priv *fp = mpi->priv;
-            apply_crop(image, p->src, vo->params->w, vo->params->h);
+            gpu_next_core_apply_crop(image, p->src, vo->params->w,
+                                     vo->params->h);
             if (opts->blend_subs) {
                 if (frame->redraw)
                     p->osd_sync++;
@@ -1076,8 +1055,8 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
         target.color.transfer = PL_COLOR_TRC_GAMMA22;
     }
 
-    apply_crop(&image, src, mpi->params.w, mpi->params.h);
-    apply_crop(&target, dst, fbo->params.w, fbo->params.h);
+    gpu_next_core_apply_crop(&image, src, mpi->params.w, mpi->params.h);
+    gpu_next_core_apply_crop(&target, dst, fbo->params.w, fbo->params.h);
     update_tm_viz(&pars->color_map_params, &target);
 
     int osd_flags = 0;

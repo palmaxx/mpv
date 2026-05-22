@@ -1273,6 +1273,29 @@ void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
     }
 }
 
+void gpu_next_core_apply_crop(struct pl_frame *frame, struct mp_rect crop,
+                              int width, int height)
+{
+    frame->crop = (struct pl_rect2df) {
+        .x0 = crop.x0,
+        .y0 = crop.y0,
+        .x1 = crop.x1,
+        .y1 = crop.y1,
+    };
+
+    // mpv gives us rotated/flipped rects, libplacebo expects unrotated
+    pl_rect2df_rotate(&frame->crop, -frame->rotation);
+    if (frame->crop.x1 < frame->crop.x0) {
+        frame->crop.x0 = width - frame->crop.x0;
+        frame->crop.x1 = width - frame->crop.x1;
+    }
+
+    if (frame->crop.y1 < frame->crop.y0) {
+        frame->crop.y0 = height - frame->crop.y0;
+        frame->crop.y1 = height - frame->crop.y1;
+    }
+}
+
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
                                          float min_luma)
