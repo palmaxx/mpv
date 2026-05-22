@@ -88,7 +88,6 @@ struct priv {
     struct m_config_cache *next_opts_cache;
     struct gl_next_opts *next_opts;
     struct mp_csp_equalizer_state *video_eq;
-    const struct pl_hook **hooks; // storage for `params.hooks`
     enum pl_color_levels output_levels;
 
     struct mp_image_params target_params;
@@ -572,8 +571,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                                     frame->redraw);
 
         // Update dynamic hook parameters
-        for (int i = 0; i < pars->params.num_hooks; i++)
-            gpu_next_core_update_hook_opts_dynamic(p->hooks[i], frame->current);
+        gpu_next_core_update_hooks_dynamic(p->core, frame->current);
     }
 
     // Render frame
@@ -1178,117 +1176,11 @@ static void update_lut(struct priv *p, struct user_lut *lut)
     lut->lut = gpu_next_core_load_lut(p->core, p->global, lut->opt);
 }
 
-static void update_hook_opts(struct priv *p, char **opts, const char *shaderpath,
-                             const struct pl_hook *hook)
-{
-    for (int i = 0; i < hook->num_parameters; i++) {
-        const struct pl_hook_par *hp = &hook->parameters[i];
-        memcpy(hp->data, &hp->initial, sizeof(*hp->data));
-    }
-
-    if (!opts)
-        return;
-
-    const char *basename = mp_basename(shaderpath);
-    struct bstr shadername;
-    if (!mp_splitext(basename, &shadername))
-        shadername = bstr0(basename);
-
-    for (int n = 0; opts[n * 2]; n++) {
-        struct bstr k = bstr0(opts[n * 2 + 0]);
-        struct bstr v = bstr0(opts[n * 2 + 1]);
-        int pos;
-        if ((pos = bstrchr(k, '/')) >= 0) {
-            if (!bstr_equals(bstr_splice(k, 0, pos), shadername))
-                continue;
-            k = bstr_cut(k, pos + 1);
-        }
-
-        for (int i = 0; i < hook->num_parameters; i++) {
-            const struct pl_hook_par *hp = &hook->parameters[i];
-            if (!bstr_equals0(k, hp->name) != 0)
-                continue;
-
-            m_option_t opt = {
-                .name = hp->name,
-            };
-
-            if (hp->names) {
-                for (int j = hp->minimum.i; j <= hp->maximum.i; j++) {
-                    if (bstr_equals0(v, hp->names[j])) {
-                        hp->data->i = j;
-                        goto next_hook;
-                    }
-                }
-            }
-
-            switch (hp->type) {
-            case PL_VAR_FLOAT:
-                opt.type = &m_option_type_float;
-                opt.min = hp->minimum.f;
-                opt.max = hp->maximum.f;
-                break;
-            case PL_VAR_SINT:
-                opt.type = &m_option_type_int;
-                opt.min = hp->minimum.i;
-                opt.max = hp->maximum.i;
-                break;
-            case PL_VAR_UINT:
-                opt.type = &m_option_type_int;
-                opt.min = MPMIN(hp->minimum.u, INT_MAX);
-                opt.max = MPMIN(hp->maximum.u, INT_MAX);
-                break;
-            }
-
-            if (!opt.type)
-                goto next_hook;
-
-            opt.type->parse(p->log, &opt, k, v, hp->data);
-            goto next_hook;
-        }
-
-    next_hook:;
-    }
-}
-
 static void update_render_options(struct vo *vo)
 {
     struct priv *p = vo->priv;
-    pl_options pars = gpu_next_core_options(p->core);
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    pars->params.background_color[0] = opts->background_color.r / 255.0;
-    pars->params.background_color[1] = opts->background_color.g / 255.0;
-    pars->params.background_color[2] = opts->background_color.b / 255.0;
-    pars->params.background_transparency = 1 - opts->background_color.a / 255.0;
-    pars->params.skip_anti_aliasing = !opts->correct_downscaling;
-    pars->params.disable_linear_scaling = !opts->linear_downscaling && !opts->linear_upscaling;
-    pars->params.disable_fbos = opts->dumb_mode == 1;
-
-    static const int map_background_types[] = {
-        [BACKGROUND_NONE]  = PL_CLEAR_SKIP,
-        [BACKGROUND_COLOR] = PL_CLEAR_COLOR,
-        [BACKGROUND_TILES] = PL_CLEAR_TILES,
-        [BACKGROUND_BLUR]  = PL_CLEAR_BLUR,
-    };
-    pars->params.background = map_background_types[opts->background];
-    pars->params.border = map_background_types[p->next_opts->border_background];
-    pars->params.blur_radius = p->next_opts->background_blur_radius;
-    pars->params.tile_size = opts->background_tile_size * 2;
-    for (int i = 0; i < 2; ++i) {
-        pars->params.tile_colors[i][0] = opts->background_tile_color[i].r / 255.0f;
-        pars->params.tile_colors[i][1] = opts->background_tile_color[i].g / 255.0f;
-        pars->params.tile_colors[i][2] = opts->background_tile_color[i].b / 255.0f;
-    }
-
-    pars->params.corner_rounding = p->next_opts->corner_rounding;
-    pars->params.correct_subpixel_offsets = !opts->scaler_resizes_only;
-
-    // Map scaler options as best we can
-    pars->params.upscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_SCALE);
-    pars->params.downscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_DSCALE);
-    pars->params.plane_upscaler = gpu_next_core_map_scaler(p->core, opts, SCALER_CSCALE);
-    pars->params.frame_mixer = opts->interpolation ?
-        gpu_next_core_map_scaler(p->core, opts, SCALER_TSCALE) : NULL;
+    gpu_next_core_update_render_options(p->core, p->opts_cache->opts,
+                                       p->next_opts, p->paused);
 
     // Request as many frames as required from the decoder, depending on the
     // speed VPS/FPS ratio libplacebo may need more frames. Request frames up to
@@ -1296,106 +1188,6 @@ static void update_render_options(struct vo *vo)
     // the core so the request stays in sync with the resolved frame mixer.
     vo_set_queue_params(vo, 0, MPMIN(VO_MAX_REQ_FRAMES,
                                      gpu_next_core_required_frames(p->core)));
-
-    pars->params.deband_params = opts->deband ? &pars->deband_params : NULL;
-    pars->deband_params.iterations = opts->deband_opts->iterations;
-    pars->deband_params.radius = opts->deband_opts->range;
-    pars->deband_params.threshold = opts->deband_opts->threshold / 16.384;
-    pars->deband_params.grain = opts->deband_opts->grain / 8.192;
-
-    pars->params.sigmoid_params = opts->sigmoid_upscaling ? &pars->sigmoid_params : NULL;
-    pars->sigmoid_params.center = opts->sigmoid_center;
-    pars->sigmoid_params.slope = opts->sigmoid_slope;
-
-    pars->params.peak_detect_params = opts->tone_map.compute_peak >= 0 ? &pars->peak_detect_params : NULL;
-    pars->peak_detect_params.smoothing_period = opts->tone_map.decay_rate;
-    pars->peak_detect_params.scene_threshold_low = opts->tone_map.scene_threshold_low;
-    pars->peak_detect_params.scene_threshold_high = opts->tone_map.scene_threshold_high;
-    pars->peak_detect_params.percentile = opts->tone_map.peak_percentile;
-    pars->peak_detect_params.allow_delayed = p->next_opts->delayed_peak;
-
-    const struct pl_tone_map_function * const tone_map_funs[] = {
-        [TONE_MAPPING_AUTO]     = &pl_tone_map_auto,
-        [TONE_MAPPING_CLIP]     = &pl_tone_map_clip,
-        [TONE_MAPPING_MOBIUS]   = &pl_tone_map_mobius,
-        [TONE_MAPPING_REINHARD] = &pl_tone_map_reinhard,
-        [TONE_MAPPING_HABLE]    = &pl_tone_map_hable,
-        [TONE_MAPPING_GAMMA]    = &pl_tone_map_gamma,
-        [TONE_MAPPING_LINEAR]   = &pl_tone_map_linear,
-        [TONE_MAPPING_SPLINE]   = &pl_tone_map_spline,
-        [TONE_MAPPING_BT_2390]  = &pl_tone_map_bt2390,
-        [TONE_MAPPING_BT_2446A] = &pl_tone_map_bt2446a,
-        [TONE_MAPPING_ST2094_40] = &pl_tone_map_st2094_40,
-        [TONE_MAPPING_ST2094_10] = &pl_tone_map_st2094_10,
-    };
-
-    const struct pl_gamut_map_function * const gamut_modes[] = {
-        [GAMUT_AUTO]            = pl_color_map_default_params.gamut_mapping,
-        [GAMUT_CLIP]            = &pl_gamut_map_clip,
-        [GAMUT_PERCEPTUAL]      = &pl_gamut_map_perceptual,
-        [GAMUT_RELATIVE]        = &pl_gamut_map_relative,
-        [GAMUT_SATURATION]      = &pl_gamut_map_saturation,
-        [GAMUT_ABSOLUTE]        = &pl_gamut_map_absolute,
-        [GAMUT_DESATURATE]      = &pl_gamut_map_desaturate,
-        [GAMUT_DARKEN]          = &pl_gamut_map_darken,
-        [GAMUT_WARN]            = &pl_gamut_map_highlight,
-        [GAMUT_LINEAR]          = &pl_gamut_map_linear,
-    };
-
-    pars->color_map_params.tone_mapping_function = tone_map_funs[opts->tone_map.curve];
-AV_NOWARN_DEPRECATED(
-    pars->color_map_params.tone_mapping_param = opts->tone_map.curve_param;
-    if (isnan(pars->color_map_params.tone_mapping_param)) // vo_gpu compatibility
-        pars->color_map_params.tone_mapping_param = 0.0;
-)
-    pars->color_map_params.inverse_tone_mapping = opts->tone_map.inverse;
-    pars->color_map_params.contrast_recovery = opts->tone_map.contrast_recovery;
-    pars->color_map_params.visualize_lut = opts->tone_map.visualize;
-    pars->color_map_params.contrast_smoothness = opts->tone_map.contrast_smoothness;
-    pars->color_map_params.gamut_mapping = gamut_modes[opts->tone_map.gamut_mode];
-
-    pars->params.dither_params = NULL;
-    pars->params.error_diffusion = NULL;
-
-    switch (opts->dither_algo) {
-    case DITHER_ERROR_DIFFUSION:
-        pars->params.error_diffusion = pl_find_error_diffusion_kernel(opts->error_diffusion);
-        if (!pars->params.error_diffusion) {
-            MP_WARN(p, "Could not find error diffusion kernel '%s', falling "
-                    "back to fruit.\n", opts->error_diffusion);
-        }
-        MP_FALLTHROUGH;
-    case DITHER_ORDERED:
-    case DITHER_FRUIT:
-        pars->params.dither_params = &pars->dither_params;
-        pars->dither_params.method = opts->dither_algo == DITHER_ORDERED
-                                ? PL_DITHER_ORDERED_FIXED
-                                : PL_DITHER_BLUE_NOISE;
-        pars->dither_params.lut_size = opts->dither_size;
-        pars->dither_params.temporal = opts->temporal_dither;
-        break;
-    }
-
-    if (opts->dither_depth < 0) {
-        pars->params.dither_params = NULL;
-        pars->params.error_diffusion = NULL;
-    }
-
-    gpu_next_core_update_icc_opts(p->core, opts->icc_opts);
-
-    pars->params.num_hooks = 0;
-    const struct pl_hook *hook;
-    for (int i = 0; opts->user_shaders && opts->user_shaders[i]; i++) {
-        if ((hook = gpu_next_core_load_hook(p->core, p->global, opts->user_shaders[i]))) {
-            MP_TARRAY_APPEND(p, p->hooks, pars->params.num_hooks, hook);
-            update_hook_opts(p, opts->user_shader_opts, opts->user_shaders[i], hook);
-        }
-    }
-
-    pars->params.hooks = p->hooks;
-
-    MP_DBG(p, "Render options updated, flushing renderer cache.\n");
-    gpu_next_core_queue_set_flush(p->core, p->paused || !p->next_opts->inter_preserve);
 }
 
 const struct vo_driver video_out_gpu_next = {

@@ -539,12 +539,25 @@ struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
 void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex);
 pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core);
 
-// Update the libplacebo hook's named parameters that have an auto-source
+// Resolve the gpu-next render options into the core's libplacebo
+// pl_options: scalers, frame mixer, deband / sigmoid / peak-detect /
+// tone-map / dither params, the ICC options (gpu_next_core_update_icc_opts)
+// and the user-shader hook list. paused is the front-end's pause state,
+// folded with interpolation-preserve into the deferred renderer-cache
+// flush. The front-end calls this on an options change; it must then
+// resize its frame queue from gpu_next_core_required_frames(), which the
+// freshly-resolved frame mixer drives.
+void gpu_next_core_update_render_options(struct gpu_next_core *core,
+                                         const struct gl_video_opts *opts,
+                                         const struct gl_next_opts *next_opts,
+                                         bool paused);
+
+// Refresh every active hook's named parameters that have an auto-source
 // (gpu_get_auto_param in video/out/gpu/utils.c -- PTS, chroma_offset_*,
-// HDR fields). The front-end calls this once per draw_frame per hook
-// before pl_render_image_mix. Pure on `hook` + `mpi`, no core state.
-void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,
-                                            const struct mp_image *mpi);
+// HDR fields) from the current frame. The front-end calls this once per
+// draw, before the render.
+void gpu_next_core_update_hooks_dynamic(struct gpu_next_core *core,
+                                        const struct mp_image *mpi);
 
 // Apply the target-contrast option to a colorspace (pure; no swapchain).
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
