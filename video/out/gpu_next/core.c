@@ -563,6 +563,215 @@ bool gpu_next_core_render_image(struct gpu_next_core *core,
     return pl_render_image(core->rr, image, target, params);
 }
 
+void gpu_next_core_screenshot(struct gpu_next_core *core,
+                              struct voctrl_screenshot *args,
+                              struct mp_rect src, struct mp_rect dst,
+                              struct mp_osd_res osd_res,
+                              int fallback_depth, bool want_alpha,
+                              struct gpu_next_osd_state *osd_state)
+{
+    const struct gl_video_opts *opts = core->fe.opts;
+    pl_options pars = core->pars;
+    pl_gpu gpu = core->gpu;
+    pl_tex fbo = NULL;
+    args->res = NULL;
+
+    struct pl_render_params params = pars->params;
+    params.info_callback = NULL;
+    params.skip_caching_single_frame = true;
+    params.preserve_mixing_cache = false;
+    params.frame_mixer = NULL;
+
+    struct pl_peak_detect_params peak_params;
+    if (params.peak_detect_params) {
+        peak_params = *params.peak_detect_params;
+        params.peak_detect_params = &peak_params;
+        peak_params.allow_delayed = false;
+    }
+
+    // Retrieve the current frame from the frame queue
+    struct pl_frame_mix mix;
+    enum pl_queue_status status;
+    struct pl_queue_params qparams = *pl_queue_params(
+        .pts = gpu_next_core_queue_last_pts(core),
+        .drift_compensation = 0,
+    );
+    status = pl_queue_update(core->queue, &mix, &qparams);
+    mp_assert(status != PL_QUEUE_EOF);
+    if (status == PL_QUEUE_ERR) {
+        MP_ERR(core, "Unknown error occurred while trying to take screenshot!\n");
+        return;
+    }
+    if (!mix.num_frames) {
+        MP_ERR(core, "No frames available to take screenshot of, is a file loaded?\n");
+        return;
+    }
+
+    // Passing an interpolation radius of 0 guarantees that the first frame in
+    // the resulting mix is the correct frame for this PTS
+    struct pl_frame image = *(struct pl_frame *) mix.frames[0];
+    struct mp_image *mpi = image.user_data;
+    if (!args->scaled) {
+        int w, h;
+        mp_image_params_get_dsize(&mpi->params, &w, &h);
+        if (w < 1 || h < 1)
+            return;
+
+        int src_w = mpi->params.w;
+        int src_h = mpi->params.h;
+        src = (struct mp_rect) {0, 0, src_w, src_h};
+        dst = (struct mp_rect) {0, 0, w, h};
+
+        if (mp_image_crop_valid(&mpi->params))
+            src = mpi->params.crop;
+
+        if (mpi->params.rotate % 180 == 90) {
+            MPSWAP(int, w, h);
+            MPSWAP(int, src_w, src_h);
+        }
+        mp_rect_rotate(&src, src_w, src_h, mpi->params.rotate);
+        mp_rect_rotate(&dst, w, h, mpi->params.rotate);
+
+        osd_res = (struct mp_osd_res) {
+            .display_par = 1.0,
+            .w = mp_rect_w(dst),
+            .h = mp_rect_h(dst),
+        };
+    }
+
+    // Create target FBO, try high bit depth first
+    int mpfmt;
+    for (int depth = args->high_bit_depth ? 16 : 8; depth; depth -= 8) {
+        if (depth == 16) {
+            mpfmt = IMGFMT_RGBA64;
+        } else {
+            mpfmt = want_alpha ? IMGFMT_RGBA : IMGFMT_RGB0;
+        }
+        pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, depth, depth,
+                                 PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+        if (!fmt)
+            continue;
+
+        fbo = pl_tex_create(gpu, pl_tex_params(
+            .w = osd_res.w,
+            .h = osd_res.h,
+            .format = fmt,
+            .blit_dst = true,
+            .renderable = true,
+            .host_readable = true,
+            .storable = fmt->caps & PL_FMT_CAP_STORABLE,
+        ));
+        if (fbo)
+            break;
+    }
+
+    if (!fbo) {
+        MP_ERR(core, "Failed creating target FBO for screenshot!\n");
+        return;
+    }
+
+    struct pl_frame target = {
+        .repr = pl_color_repr_rgb,
+        .num_planes = 1,
+        .planes[0] = {
+            .texture = fbo,
+            .components = 4,
+            .component_mapping = {0, 1, 2, 3},
+        },
+    };
+
+    if (args->scaled) {
+        // Apply target LUT, ICC profile and CSP override only in window mode
+        gpu_next_core_apply_target_options(core, &target, 0, false,
+                                           fallback_depth);
+    } else if (args->native_csp) {
+        target.color = image.color;
+    } else {
+        target.color = pl_color_space_srgb;
+    }
+
+    // sRGB reference display is pure 2.2 power function, see IEC 61966-2-1-1999.
+    // Round-trip back to sRGB if the source is also sRGB. In other cases, we
+    // use piecewise sRGB transfer function, as this is likely the be expected
+    // for file encoding.
+    if (opts->treat_srgb_as_power22 & 1 &&
+        target.color.transfer == PL_COLOR_TRC_SRGB &&
+        mpi->params.color.transfer == PL_COLOR_TRC_SRGB)
+    {
+        target.color.transfer = PL_COLOR_TRC_GAMMA22;
+    }
+
+    gpu_next_core_apply_crop(&image, src, mpi->params.w, mpi->params.h);
+    gpu_next_core_apply_crop(&target, dst, fbo->params.w, fbo->params.h);
+    gpu_next_core_update_tm_viz(core, &target);
+
+    int osd_flags = 0;
+    if (!args->subs)
+        osd_flags |= OSD_DRAW_OSD_ONLY;
+    if (!args->osd)
+        osd_flags |= OSD_DRAW_SUB_ONLY;
+
+    struct frame_priv *fp = mpi->priv;
+    if (opts->blend_subs) {
+        float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image.crop : target.crop);
+        float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image.crop : target.crop);
+        float rx = w / pl_rect_w(image.crop);
+        float ry = h / pl_rect_h(image.crop);
+        struct mp_osd_res res = {
+            .w = w,
+            .h = h,
+            .ml = -image.crop.x0 * rx,
+            .mr = (image.crop.x1 - mpi->params.w) * rx,
+            .mt = -image.crop.y0 * ry,
+            .mb = (image.crop.y1 - mpi->params.h) * ry,
+            .display_par = 1.0,
+        };
+        enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
+            ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
+        gpu_next_core_update_overlays(core, res, osd_flags,
+                                     rel, &fp->subs, &image, mpi,
+                                     mpi->params.stereo3d);
+    } else {
+        // Disable overlays when blend_subs is disabled
+        gpu_next_core_update_overlays(core, osd_res, osd_flags,
+                                     PL_OVERLAY_COORDS_DST_FRAME,
+                                     osd_state, &target, mpi,
+                                     mpi->params.stereo3d);
+        image.num_overlays = 0;
+    }
+
+    if (!gpu_next_core_render_image(core, &image, &target, &params)) {
+        MP_ERR(core, "Failed rendering frame!\n");
+        goto done;
+    }
+
+    args->res = mp_image_alloc(mpfmt, fbo->params.w, fbo->params.h);
+    if (!args->res)
+        goto done;
+
+    args->res->params.color.primaries = target.color.primaries;
+    args->res->params.color.transfer = target.color.transfer;
+    args->res->params.repr.levels = target.repr.levels;
+    args->res->params.color.hdr = target.color.hdr;
+    if (args->scaled)
+        args->res->params.p_w = args->res->params.p_h = 1;
+
+    bool ok = pl_tex_download(gpu, pl_tex_transfer_params(
+        .tex = fbo,
+        .ptr = args->res->planes[0],
+        .row_pitch = args->res->stride[0],
+    ));
+
+    if (!ok) {
+        talloc_free(args->res);
+        args->res = NULL;
+    }
+
+    // fall through
+done:
+    pl_tex_destroy(gpu, &fbo);
+}
+
 bool gpu_next_core_get_hdr_metadata(struct gpu_next_core *core,
                                     struct pl_hdr_metadata *metadata)
 {
