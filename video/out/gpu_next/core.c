@@ -27,6 +27,9 @@
 #include "config.h"
 #include "common/common.h"
 #include "common/msg.h"
+#include "options/m_config.h"
+#include "options/m_option.h"
+#include "options/options.h"
 #include "options/path.h"
 #include "osdep/threads.h"
 #include "stream/stream.h"
@@ -48,6 +51,56 @@
 #include "video/out/d3d11/ra_d3d11.h"
 #include "osdep/windows_utils.h"
 #endif
+
+static const struct m_opt_choice_alternatives lut_types[] = {
+    {"auto",        PL_LUT_UNKNOWN},
+    {"native",      PL_LUT_NATIVE},
+    {"normalized",  PL_LUT_NORMALIZED},
+    {"conversion",  PL_LUT_CONVERSION},
+    {0}
+};
+
+#define OPT_BASE_STRUCT struct gl_next_opts
+const struct m_sub_options gl_next_conf = {
+    .opts = (const struct m_option[]) {
+        {"sub-hdr-peak", OPT_CHOICE(sub_hdr_peak, {"sdr", PL_COLOR_SDR_WHITE}),
+            M_RANGE(10, 10000)},
+        {"image-subs-hdr-peak", OPT_CHOICE(image_subs_hdr_peak, {"sdr", PL_COLOR_SDR_WHITE},
+            {"video", -1}, {"video-static", -2}, {"video-dynamic", -3}),  M_RANGE(10, 10000)},
+        {"allow-delayed-peak-detect", OPT_BOOL(delayed_peak)},
+        {"border-background", OPT_CHOICE(border_background,
+            {"none",  BACKGROUND_NONE},
+            {"color", BACKGROUND_COLOR},
+            {"tiles", BACKGROUND_TILES}
+            ,{"blur", BACKGROUND_BLUR})},
+        {"background-blur-radius", OPT_FLOAT(background_blur_radius)},
+        {"corner-rounding", OPT_FLOAT(corner_rounding), M_RANGE(0, 1)},
+        {"interpolation-preserve", OPT_BOOL(inter_preserve)},
+        {"lut", OPT_STRING(lut.opt), .flags = M_OPT_FILE},
+        {"lut-type", OPT_CHOICE_C(lut.type, lut_types)},
+        {"image-lut", OPT_STRING(image_lut.opt), .flags = M_OPT_FILE},
+        {"image-lut-type", OPT_CHOICE_C(image_lut.type, lut_types)},
+        {"target-lut", OPT_STRING(target_lut.opt), .flags = M_OPT_FILE},
+        {"target-colorspace-hint", OPT_CHOICE(target_hint, {"auto", -1}, {"no", 0}, {"yes", 1})},
+        {"target-colorspace-hint-mode", OPT_CHOICE(target_hint_mode, {"target", 0}, {"source", 1}, {"source-dynamic", 2})},
+        {"target-colorspace-hint-strict", OPT_BOOL(target_hint_strict)},
+        // No `target-lut-type` because we don't support non-RGB targets
+        {"libplacebo-opts", OPT_KEYVALUELIST(raw_opts)},
+        {0},
+    },
+    .defaults = &(struct gl_next_opts) {
+        .border_background = BACKGROUND_COLOR,
+        .background_blur_radius = 16.0f,
+        .inter_preserve = true,
+        .sub_hdr_peak = PL_COLOR_SDR_WHITE,
+        .image_subs_hdr_peak = 1000,
+        .target_hint = -1,
+        .target_hint_strict = true,
+    },
+    .size = sizeof(struct gl_next_opts),
+    .change_flags = UPDATE_VIDEO,
+};
+#undef OPT_BASE_STRUCT
 
 struct scaler_params {
     struct pl_filter_config config;
