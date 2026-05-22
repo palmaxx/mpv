@@ -427,6 +427,14 @@ void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
                                          float min_luma);
 
+// Apply an mpv crop rect to a pl_frame's crop field (pure; no swapchain,
+// no core state). mpv hands us rotated/flipped rects while libplacebo
+// expects unrotated ones, so the frame's rotation is undone in place;
+// width/height are the unrotated frame dimensions, used to mirror
+// flipped rects.
+void gpu_next_core_apply_crop(struct pl_frame *frame, struct mp_rect crop,
+                              int width, int height);
+
 // What the caller must do with the swapchain colorspace hint after
 // gpu_next_core_target_hint() produced it. The hint math is kept free of
 // any swapchain access (the backend-reported target colorspace is passed
