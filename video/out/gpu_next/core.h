@@ -44,6 +44,7 @@ struct pl_hook;
 struct ra;
 struct ra_hwdec;
 struct voctrl_performance_data;
+struct voctrl_screenshot;
 
 // A user-supplied LUT (--lut / --image-lut / --target-lut): the option
 // string, the path it was last loaded from (change tracker) and the
@@ -359,6 +360,24 @@ bool gpu_next_core_render_image(struct gpu_next_core *core,
                                 const struct pl_frame *image,
                                 const struct pl_frame *target,
                                 const struct pl_render_params *params);
+
+// Render a screenshot of the current frame into args->res. args is the
+// VOCTRL_SCREENSHOT request; src/dst/osd_res are the front-end's current
+// geometry (used for windowed screenshots); fallback_depth is the
+// front-end's surface bit depth, used by apply_target_options when
+// --dither-depth is 0 (the windowed VO's swapchain color_depth, 0 for
+// the libmpv render API); want_alpha selects RGBA vs RGB0 for the 8-bit
+// screenshot FBO; osd_state is the front-end's main-OSD overlay cache
+// for the !blend_subs path. The caller refreshes the render options
+// (m_config_cache_update + change-detection update_render_options +
+// gpu_next_core_update_options) before calling. On success args->res
+// holds the downloaded image; on failure args->res is NULL.
+void gpu_next_core_screenshot(struct gpu_next_core *core,
+                              struct voctrl_screenshot *args,
+                              struct mp_rect src, struct mp_rect dst,
+                              struct mp_osd_res osd_res,
+                              int fallback_depth, bool want_alpha,
+                              struct gpu_next_osd_state *osd_state);
 
 // Mirror pl_renderer_get_hdr_metadata(): fetch the renderer's current
 // peak-detection HDR metadata into *metadata. Returns false when it is
