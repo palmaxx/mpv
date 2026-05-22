@@ -153,6 +153,14 @@ struct gpu_next_core {
     // enabled) and cleaned up in gpu_next_core_destroy.
     struct cache shader_cache, icc_cache;
 
+    // ICC profile state. icc_path tracks the manually-configured
+    // --icc-profile (NULL = none / auto), icc_profile is the resolved
+    // libplacebo object (cached in icc_cache) and icc_params the params
+    // built by gpu_next_core_update_icc_opts.
+    struct pl_icc_params icc_params;
+    char *icc_path;
+    pl_icc_object icc_profile;
+
     pl_options pars;
     pl_renderer rr;
     pl_queue queue;
@@ -446,11 +454,6 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
     core->osd_sync = 1;
     mp_mutex_init(&core->dr_lock);
     return core;
-}
-
-pl_cache gpu_next_core_icc_cache(struct gpu_next_core *core)
-{
-    return core->icc_cache.cache;
 }
 
 pl_options gpu_next_core_options(struct gpu_next_core *core)
@@ -757,6 +760,7 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
     // uninit relied on.
     cache_uninit(&core->shader_cache);
     cache_uninit(&core->icc_cache);
+    pl_icc_close(&core->icc_profile);
 
     talloc_free(core);
     *core_ptr = NULL;
@@ -1559,6 +1563,84 @@ void gpu_next_core_apply_crop(struct pl_frame *frame, struct mp_rect crop,
     }
 }
 
+bool gpu_next_core_update_icc(struct gpu_next_core *core, struct bstr icc)
+{
+    struct pl_icc_profile profile = {
+        .data = icc.start,
+        .len  = icc.len,
+    };
+
+    pl_icc_profile_compute_signature(&profile);
+
+    bool ok = pl_icc_update(core->pllog, &core->icc_profile, &profile,
+                            &core->icc_params);
+    talloc_free(icc.start);
+    return ok;
+}
+
+void gpu_next_core_update_icc_opts(struct gpu_next_core *core,
+                                   const struct mp_icc_opts *opts)
+{
+    if (!opts)
+        return;
+
+    if (!opts->profile_auto && !core->icc_path) {
+        // Un-set any auto-loaded profiles if icc-profile-auto was disabled
+        gpu_next_core_update_icc(core, (bstr) {0});
+    }
+
+    int s_r = 0, s_g = 0, s_b = 0;
+    gl_parse_3dlut_size(opts->size_str, &s_r, &s_g, &s_b);
+    core->icc_params = pl_icc_default_params;
+    core->icc_params.intent = opts->intent;
+    core->icc_params.size_r = s_r;
+    core->icc_params.size_g = s_g;
+    core->icc_params.size_b = s_b;
+    core->icc_params.cache = core->icc_cache.cache;
+
+    if (!opts->profile || !opts->profile[0]) {
+        // No profile enabled, un-load any existing profiles
+        gpu_next_core_update_icc(core, (bstr) {0});
+        TA_FREEP(&core->icc_path);
+        return;
+    }
+
+    if (core->icc_path && strcmp(opts->profile, core->icc_path) == 0)
+        return; // ICC profile hasn't changed
+
+    char *fname = mp_get_user_path(NULL, core->global, opts->profile);
+    MP_VERBOSE(core, "Opening ICC profile '%s'\n", fname);
+    struct bstr icc = stream_read_file(fname, core, core->global, 100000000); // 100 MB
+    talloc_free(fname);
+    gpu_next_core_update_icc(core, icc);
+
+    // Update cached path
+    talloc_replace(core, core->icc_path, opts->profile);
+}
+
+bool gpu_next_core_icc_has_manual_profile(struct gpu_next_core *core)
+{
+    return core->icc_path != NULL;
+}
+
+void gpu_next_core_apply_target_icc(struct gpu_next_core *core,
+                                    struct pl_frame *target, bool icc_use_luma)
+{
+    if (icc_use_luma) {
+        core->icc_params.max_luma = 0.0f;
+    } else {
+        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+            .color    = &target->color,
+            .metadata = PL_HDR_METADATA_HDR10, // use only static HDR nits
+            .scaling  = PL_HDR_NITS,
+            .out_max  = &core->icc_params.max_luma,
+        ));
+    }
+
+    pl_icc_update(core->pllog, &core->icc_profile, NULL, &core->icc_params);
+    target->icc = core->icc_profile;
+}
+
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
                                          float min_luma)
@@ -1589,9 +1671,9 @@ void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
 }
 
 enum target_hint_action gpu_next_core_target_hint(
+    struct gpu_next_core *core,
     const struct gl_video_opts *opts, int target_hint, int target_hint_mode,
-    const struct pl_color_space *source, pl_log pllog,
-    pl_icc_object *icc_profile, struct pl_icc_params *icc_params,
+    const struct pl_color_space *source,
     struct pl_color_space *target_csp, struct pl_color_space *out_hint,
     bool *out_target_hint, bool *out_target_unknown)
 {
@@ -1696,22 +1778,22 @@ enum target_hint_action gpu_next_core_target_hint(
         if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
             hint.hdr.max_fall = 0;
         gpu_next_core_apply_target_contrast(opts, &hint, hint.hdr.min_luma);
-        if (*icc_profile)
-            hint = (*icc_profile)->csp;
+        if (core->icc_profile)
+            hint = core->icc_profile->csp;
         if (opts->icc_opts->icc_use_luma) {
-            icc_params->max_luma = 0.0f;
+            core->icc_params.max_luma = 0.0f;
         } else {
             pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
                 .color    = &hint,
                 .metadata = PL_HDR_METADATA_HDR10, // use only static HDR nits
                 .scaling  = PL_HDR_NITS,
-                .out_max  = &icc_params->max_luma,
+                .out_max  = &core->icc_params.max_luma,
             ));
         }
-        pl_icc_update(pllog, icc_profile, NULL, icc_params);
+        pl_icc_update(core->pllog, &core->icc_profile, NULL, &core->icc_params);
         // Update again after possible max_luma change
-        if (*icc_profile)
-            hint = (*icc_profile)->csp;
+        if (core->icc_profile)
+            hint = core->icc_profile->csp;
         action = TARGET_HINT_SET;
     } else if (!do_hint) {
         if (!hint.hdr.min_luma)

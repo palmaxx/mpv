@@ -28,6 +28,7 @@
 #include <libplacebo/utils/frame_queue.h>
 #include <libplacebo/utils/upload.h>
 
+#include "misc/bstr.h"
 #include "sub/osd.h"
 #include "video/img_format.h"
 #include "video/out/gpu/video.h"
@@ -98,11 +99,35 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
                                            const struct gl_video_opts *opts);
 void gpu_next_core_destroy(struct gpu_next_core **core);
 
-// The libplacebo ICC-object cache owned by the core, or NULL when ICC
-// caching is disabled. Transitional: the windowed VO still resolves ICC
-// profiles itself and needs this handle for pl_icc_params.cache; W5-3
-// moves the ICC state into the core and retires this accessor.
-pl_cache gpu_next_core_icc_cache(struct gpu_next_core *core);
+// ICC profile handling, owned by the core. The core tracks the
+// manually-configured --icc-profile path, the resolved libplacebo ICC
+// object (cached in its icc_cache) and the pl_icc_params, and attaches
+// the object to render targets.
+
+// Process the mp_icc_opts: rebuild icc_params (rendering intent, 3DLUT
+// size, the icc_cache handle) and, when --icc-profile names a file, load
+// it -- unloading any previously loaded manual or auto profile first.
+// opts may be NULL (no ICC options group).
+void gpu_next_core_update_icc_opts(struct gpu_next_core *core,
+                                   const struct mp_icc_opts *opts);
+
+// Load a raw ICC profile blob, taking ownership of icc.start; icc.len ==
+// 0 unloads the current profile. The front-end's auto-profile path --
+// which queries the profile from the platform display, a front-end-
+// specific operation -- feeds the queried blob in through here.
+bool gpu_next_core_update_icc(struct gpu_next_core *core, struct bstr icc);
+
+// Whether a manual --icc-profile is currently loaded. The front-end's
+// auto-profile query skips when one is, so icc-profile-auto does not
+// override an explicitly configured profile.
+bool gpu_next_core_icc_has_manual_profile(struct gpu_next_core *core);
+
+// Refresh the ICC object for a render target and attach it (target->icc),
+// deriving the ICC max-luma from the target colorspace unless icc_use_luma
+// (gl_video_opts.icc_opts.icc_use_luma) is set.
+void gpu_next_core_apply_target_icc(struct gpu_next_core *core,
+                                    struct pl_frame *target,
+                                    bool icc_use_luma);
 
 // Front-end-specific resources the core's frame-ingest callbacks
 // (map/unmap/discard) reach through, instead of a back-pointer to the
@@ -546,17 +571,17 @@ enum target_hint_action {
     TARGET_HINT_CLEAR,      // hint(NULL)
 };
 
-// Pure (swapchain-free) computation of the libplacebo target colorspace
-// hint. target_csp is the backend-reported target colorspace on input
-// (zeroed if unavailable); it is post-processed in place and also consumed
-// by the caller afterwards. source is the current frame's colorspace, or
-// NULL if there is no current frame. target_hint/target_hint_mode are the
-// corresponding gl_next_opts fields. icc_profile/icc_params are updated in
-// place (pl_icc_update). Behaviour is identical to the inline block this
-// was extracted from.
+// Swapchain-free computation of the libplacebo target colorspace hint.
+// target_csp is the backend-reported target colorspace on input (zeroed
+// if unavailable); it is post-processed in place and also consumed by the
+// caller afterwards. source is the current frame's colorspace, or NULL if
+// there is no current frame. target_hint/target_hint_mode are the
+// corresponding gl_next_opts fields. The core's ICC object/params are
+// refreshed in place (pl_icc_update). Behaviour is identical to the
+// inline block this was extracted from.
 enum target_hint_action gpu_next_core_target_hint(
+    struct gpu_next_core *core,
     const struct gl_video_opts *opts, int target_hint, int target_hint_mode,
-    const struct pl_color_space *source, pl_log pllog,
-    pl_icc_object *icc_profile, struct pl_icc_params *icc_params,
+    const struct pl_color_space *source,
     struct pl_color_space *target_csp, struct pl_color_space *out_hint,
     bool *out_target_hint, bool *out_target_unknown);

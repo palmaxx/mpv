@@ -21,7 +21,6 @@
 #include <libplacebo/options.h>
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/lut.h>
-#include <libplacebo/shaders/icc.h>
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/utils/frame_queue.h>
 
@@ -91,10 +90,6 @@ struct priv {
     struct mp_csp_equalizer_state *video_eq;
     const struct pl_hook **hooks; // storage for `params.hooks`
     enum pl_color_levels output_levels;
-
-    struct pl_icc_params icc_params;
-    char *icc_path;
-    pl_icc_object icc_profile;
 
     struct mp_image_params target_params;
 };
@@ -341,19 +336,7 @@ static void apply_target_options(struct priv *p, struct pl_frame *target,
         tbits->sample_depth = dither_depth;
     }
 
-    if (opts->icc_opts->icc_use_luma) {
-        p->icc_params.max_luma = 0.0f;
-    } else {
-        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-            .color    = &target->color,
-            .metadata = PL_HDR_METADATA_HDR10, // use only static HDR nits
-            .scaling  = PL_HDR_NITS,
-            .out_max  = &p->icc_params.max_luma,
-        ));
-    }
-
-    pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
-    target->icc = p->icc_profile;
+    gpu_next_core_apply_target_icc(p->core, target, opts->icc_opts->icc_use_luma);
 }
 
 static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
@@ -457,9 +440,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     const struct pl_color_space *source =
         frame->current ? &frame->current->params.color : NULL;
     enum target_hint_action hint_action = gpu_next_core_target_hint(
-        opts, p->next_opts->target_hint, p->next_opts->target_hint_mode,
-        source, p->pllog, &p->icc_profile, &p->icc_params,
-        &target_csp, &hint, &target_hint, &target_unknown);
+        p->core, opts, p->next_opts->target_hint, p->next_opts->target_hint_mode,
+        source, &target_csp, &hint, &target_hint, &target_unknown);
 
     // Swapchain touchpoint 2/2: push the computed hint and read back the
     // colorspace the swapchain negotiated (external_params/hint).
@@ -704,26 +686,12 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
     return 0;
 }
 
-// Takes over ownership of `icc`. Can be used to unload profile (icc.len == 0)
-static bool update_icc(struct priv *p, struct bstr icc)
-{
-    struct pl_icc_profile profile = {
-        .data = icc.start,
-        .len  = icc.len,
-    };
-
-    pl_icc_profile_compute_signature(&profile);
-
-    bool ok = pl_icc_update(p->pllog, &p->icc_profile, &profile, &p->icc_params);
-    talloc_free(icc.start);
-    return ok;
-}
-
 // Returns whether the ICC profile was updated (even on failure)
 static bool update_auto_profile(struct priv *p, int *events)
 {
     const struct gl_video_opts *opts = p->opts_cache->opts;
-    if (!opts->icc_opts || !opts->icc_opts->profile_auto || p->icc_path)
+    if (!opts->icc_opts || !opts->icc_opts->profile_auto ||
+        gpu_next_core_icc_has_manual_profile(p->core))
         return false;
 
     MP_VERBOSE(p, "Querying ICC profile...\n");
@@ -737,7 +705,7 @@ static bool update_auto_profile(struct priv *p, int *events)
             MP_ERR(p, "icc-profile-auto not implemented on this platform.\n");
         }
 
-        update_icc(p, icc);
+        gpu_next_core_update_icc(p->core, icc);
         return true;
     }
 
@@ -1090,7 +1058,7 @@ static void uninit(struct vo *vo)
 
     // image_lut/lut/target_lut pl_lut pointers are not owned here -- they
     // are borrowed from the core's LUT cache (freed by core_destroy above).
-    pl_icc_close(&p->icc_profile);
+    // The ICC profile is owned and closed by gpu_next_core_destroy().
 
     p->ra_ctx = NULL;
     p->pllog = NULL;
@@ -1189,45 +1157,6 @@ static int preinit(struct vo *vo)
 err_out:
     uninit(vo);
     return -1;
-}
-
-static void update_icc_opts(struct priv *p, const struct mp_icc_opts *opts)
-{
-    if (!opts)
-        return;
-
-    if (!opts->profile_auto && !p->icc_path) {
-        // Un-set any auto-loaded profiles if icc-profile-auto was disabled
-        update_icc(p, (bstr) {0});
-    }
-
-    int s_r = 0, s_g = 0, s_b = 0;
-    gl_parse_3dlut_size(opts->size_str, &s_r, &s_g, &s_b);
-    p->icc_params = pl_icc_default_params;
-    p->icc_params.intent = opts->intent;
-    p->icc_params.size_r = s_r;
-    p->icc_params.size_g = s_g;
-    p->icc_params.size_b = s_b;
-    p->icc_params.cache = gpu_next_core_icc_cache(p->core);
-
-    if (!opts->profile || !opts->profile[0]) {
-        // No profile enabled, un-load any existing profiles
-        update_icc(p, (bstr) {0});
-        TA_FREEP(&p->icc_path);
-        return;
-    }
-
-    if (p->icc_path && strcmp(opts->profile, p->icc_path) == 0)
-        return; // ICC profile hasn't changed
-
-    char *fname = mp_get_user_path(NULL, p->global, opts->profile);
-    MP_VERBOSE(p, "Opening ICC profile '%s'\n", fname);
-    struct bstr icc = stream_read_file(fname, p, p->global, 100000000); // 100 MB
-    talloc_free(fname);
-    update_icc(p, icc);
-
-    // Update cached path
-    talloc_replace(p, p->icc_path, opts->profile);
 }
 
 static void update_lut(struct priv *p, struct user_lut *lut)
@@ -1452,7 +1381,7 @@ AV_NOWARN_DEPRECATED(
         pars->params.error_diffusion = NULL;
     }
 
-    update_icc_opts(p, opts->icc_opts);
+    gpu_next_core_update_icc_opts(p->core, opts->icc_opts);
 
     pars->params.num_hooks = 0;
     const struct pl_hook *hook;
