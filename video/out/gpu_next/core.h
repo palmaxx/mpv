@@ -614,6 +614,25 @@ void gpu_next_core_apply_target_options(struct gpu_next_core *core,
                                         const struct pl_color_space *target_csp,
                                         int fallback_depth);
 
+// Final target-colorspace refinement, run after
+// gpu_next_core_apply_target_options: clip the gamut to fit its
+// primaries' container, and resolve an SRGB target transfer against the
+// source transfer and the treat-srgb-as-power22 option. cur is the
+// current source frame (NULL for none). target_csp / target_unknown are
+// the front-end's backend-reported target colorspace (zeroed / true when
+// unavailable, as for the libmpv render API).
+void gpu_next_core_finalize_target_csp(struct gpu_next_core *core,
+                                       struct pl_frame *target,
+                                       const struct mp_image *cur,
+                                       const struct pl_color_space *target_csp,
+                                       bool target_unknown);
+
+// Position the tone-mapping visualization rectangle
+// (--tone-mapping-visualize) in the core's render params for the given
+// target. A no-op unless the visualization is enabled.
+void gpu_next_core_update_tm_viz(struct gpu_next_core *core,
+                                 const struct pl_frame *target);
+
 // Apply an mpv crop rect to a pl_frame's crop field (pure; no swapchain,
 // no core state). mpv hands us rotated/flipped rects while libplacebo
 // expects unrotated ones, so the frame's rotation is undone in place;
