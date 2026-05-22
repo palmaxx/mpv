@@ -102,7 +102,6 @@ struct priv {
     struct mp_osd_res osd_res;
     struct gpu_next_osd_state osd_state;
 
-    uint64_t osd_sync;
     bool is_interpolated;
     bool frame_pending;
     bool paused;
@@ -682,57 +681,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             break;
         }
 
-        // Update source crop and overlays on all existing frames. We
-        // technically own the `pl_frame` struct so this is kosher. This could
-        // be partially avoided by instead flushing the queue on resizes, but
-        // doing it this way avoids unnecessarily re-uploading frames.
-        for (int i = 0; i < mix.num_frames; i++) {
-            struct pl_frame *image = (struct pl_frame *) mix.frames[i];
-            struct mp_image *mpi = image->user_data;
-            struct frame_priv *fp = mpi->priv;
-            gpu_next_core_apply_crop(image, p->src, vo->params->w,
-                                     vo->params->h);
-            if (opts->blend_subs) {
-                if (frame->redraw)
-                    p->osd_sync++;
-                if (fp->osd_sync < p->osd_sync) {
-                    float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
-                    float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target.crop);
-                    float rx = w / pl_rect_w(image->crop);
-                    float ry = h / pl_rect_h(image->crop);
-                    struct mp_osd_res res = {
-                        .w = w,
-                        .h = h,
-                        .ml = -image->crop.x0 * rx,
-                        .mr = (image->crop.x1 - vo->params->w) * rx,
-                        .mt = -image->crop.y0 * ry,
-                        .mb = (image->crop.y1 - vo->params->h) * ry,
-                        .display_par = 1.0,
-                    };
-                    enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
-                        ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
-                    stats_time_start(p->stats, "osd-blend-update");
-                    update_overlays(vo, res, OSD_DRAW_SUB_ONLY,
-                                    rel, &fp->subs, image, mpi,
-                                    mpi->params.stereo3d);
-                    stats_time_end(p->stats, "osd-blend-update");
-                    fp->osd_sync = p->osd_sync;
-                }
-            } else {
-                // Disable overlays when blend_subs is disabled
-                image->num_overlays = 0;
-                fp->osd_sync = 0;
-            }
-
-            // Update the frame signature to include the current OSD sync
-            // value, in order to disambiguate between identical frames with
-            // modified OSD. Shift the OSD sync value by a lot to avoid
-            // collisions with low signature values.
-            //
-            // This is safe to do because `pl_frame_mix.signature` lives in
-            // temporary memory that is only valid for this `pl_queue_update`.
-            ((uint64_t *) mix.signatures)[i] ^= fp->osd_sync << 48;
-        }
+        // Apply source crop + blended-subtitle overlays to every frame in
+        // the mix. update_overlays itself stays VO-side (it reaches
+        // vo->osd); the core drives it through the front-end interface.
+        gpu_next_core_update_frames(p->core, &mix, &target, p->src,
+                                    vo->params->w, vo->params->h,
+                                    frame->redraw);
 
         // Update dynamic hook parameters
         for (int i = 0; i < pars->params.num_hooks; i++)
@@ -830,7 +784,7 @@ static void resize(struct vo *vo)
         osd_res_equals(p->osd_res, osd))
         return;
 
-    p->osd_sync++;
+    gpu_next_core_osd_changed(p->core);
     p->osd_res = osd;
     p->src = src;
     p->dst = dst;
@@ -1460,6 +1414,18 @@ static struct ra_hwdec *core_hwdec_get(void *ctx, int imgfmt)
     return ra_hwdec_get(ctx, imgfmt);
 }
 
+// Front-end glue for gpu_next_core_frontend.update_overlays: the core's
+// per-frame loop blends subtitles through this VO's update_overlays,
+// which reaches vo->osd. ctx is the struct vo.
+static void core_update_overlays(void *ctx, struct mp_osd_res res, int flags,
+                                 enum pl_overlay_coords coords,
+                                 struct gpu_next_osd_state *state,
+                                 struct pl_frame *frame, struct mp_image *src,
+                                 int stereo_mode)
+{
+    update_overlays(ctx, res, flags, coords, state, frame, src, stereo_mode);
+}
+
 static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -1508,10 +1474,11 @@ static int preinit(struct vo *vo)
         .timer_end = core_timer_end,
         .hwdec_get = core_hwdec_get,
         .hwdec_ctx = &p->hwdec_ctx,
+        .update_overlays = core_update_overlays,
+        .overlays_ctx = vo,
     });
     p->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(p->gpu, "r8");
     p->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(p->gpu, "bgra8");
-    p->osd_sync = 1;
 
     update_render_options(vo);
     return 0;

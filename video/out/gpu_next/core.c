@@ -133,6 +133,12 @@ struct gpu_next_core {
     pl_tex *sub_tex;
     int num_sub_tex;
 
+    // OSD blended-subtitle sync counter, bumped by gpu_next_core_osd_changed
+    // (a front-end OSD-layout change) and by every redrawn frame; compared
+    // against frame_priv.osd_sync to decide whether a queued frame's cached
+    // blended-subs overlay has gone stale and must be re-rendered.
+    uint64_t osd_sync;
+
     // Front-end interface (see gpu_next_core_set_frontend), reached by the
     // core's frame-ingest callbacks for genuinely front-end-specific
     // resources (opts, ra, instrumentation, hwdec lookup).
@@ -154,6 +160,7 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
     core->pars = pl_options_alloc(pllog);
     core->rr = pl_renderer_create(pllog, gpu);
     core->queue = pl_queue_create(gpu);
+    core->osd_sync = 1;
     mp_mutex_init(&core->dr_lock);
     return core;
 }
@@ -1127,6 +1134,75 @@ void gpu_next_core_discard_frame(const struct pl_source_frame *src)
 {
     struct mp_image *mpi = src->frame_data;
     talloc_free(mpi);
+}
+
+void gpu_next_core_osd_changed(struct gpu_next_core *core)
+{
+    core->osd_sync++;
+}
+
+void gpu_next_core_update_frames(struct gpu_next_core *core,
+                                 const struct pl_frame_mix *mix,
+                                 const struct pl_frame *target,
+                                 struct mp_rect src_crop,
+                                 int src_width, int src_height, bool redraw)
+{
+    const struct gl_video_opts *opts = core->fe.opts;
+
+    // Update source crop and overlays on all existing frames. We
+    // technically own the `pl_frame` struct so this is kosher. This could
+    // be partially avoided by instead flushing the queue on resizes, but
+    // doing it this way avoids unnecessarily re-uploading frames.
+    for (int i = 0; i < mix->num_frames; i++) {
+        struct pl_frame *image = (struct pl_frame *) mix->frames[i];
+        struct mp_image *mpi = image->user_data;
+        struct frame_priv *fp = mpi->priv;
+        gpu_next_core_apply_crop(image, src_crop, src_width, src_height);
+        if (opts->blend_subs) {
+            if (redraw)
+                core->osd_sync++;
+            if (fp->osd_sync < core->osd_sync) {
+                float w = pl_rect_w(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target->crop);
+                float h = pl_rect_h(opts->blend_subs == BLEND_SUBS_VIDEO ? image->crop : target->crop);
+                float rx = w / pl_rect_w(image->crop);
+                float ry = h / pl_rect_h(image->crop);
+                struct mp_osd_res res = {
+                    .w = w,
+                    .h = h,
+                    .ml = -image->crop.x0 * rx,
+                    .mr = (image->crop.x1 - src_width) * rx,
+                    .mt = -image->crop.y0 * ry,
+                    .mb = (image->crop.y1 - src_height) * ry,
+                    .display_par = 1.0,
+                };
+                enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
+                    ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
+                if (core->fe.update_overlays) {
+                    if (core->fe.timer_start)
+                        core->fe.timer_start(core->fe.timer_ctx, "osd-blend-update");
+                    core->fe.update_overlays(core->fe.overlays_ctx, res,
+                                             OSD_DRAW_SUB_ONLY, rel, &fp->subs,
+                                             image, mpi, mpi->params.stereo3d);
+                    if (core->fe.timer_end)
+                        core->fe.timer_end(core->fe.timer_ctx, "osd-blend-update");
+                }
+                fp->osd_sync = core->osd_sync;
+            }
+        } else {
+            // Disable overlays when blend_subs is disabled
+            image->num_overlays = 0;
+            fp->osd_sync = 0;
+        }
+
+        // Update the frame signature to include the current OSD sync
+        // value, in order to disambiguate between identical frames with
+        // modified OSD. Shift the OSD sync value by a lot to avoid
+        // collisions with low signature values.
+        //
+        // This is safe to do because `pl_frame_mix.signature` lives in
+        // temporary memory that is only valid for this `pl_queue_update`.
+        ((uint64_t *) mix->signatures)[i] ^= fp->osd_sync << 48;
+    }
 }
 
 void gpu_next_core_update_hook_opts_dynamic(const struct pl_hook *hook,

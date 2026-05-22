@@ -32,6 +32,7 @@
 #include "video/img_format.h"
 #include "video/out/gpu/video.h"
 
+struct gpu_next_osd_state;
 struct mp_image;
 struct mp_image_params;
 struct mp_log;
@@ -83,6 +84,19 @@ struct gpu_next_core_frontend {
     // time (mirroring ra_hwdec_get). NULL means SW decoding only.
     struct ra_hwdec *(*hwdec_get)(void *ctx, int imgfmt);
     void *hwdec_ctx;
+
+    // Blend the front-end's OSD/subtitle source onto a frame. The core's
+    // per-frame loop (gpu_next_core_update_frames) calls this for each
+    // queued frame whose cached blended-subtitle overlay has gone stale.
+    // The windowed VO wraps its update_overlays (which reaches vo->osd);
+    // a future libmpv render backend wraps its own OSD source. NULL
+    // leaves blended subtitles unrendered.
+    void (*update_overlays)(void *ctx, struct mp_osd_res res, int flags,
+                            enum pl_overlay_coords coords,
+                            struct gpu_next_osd_state *state,
+                            struct pl_frame *frame, struct mp_image *src,
+                            int stereo_mode);
+    void *overlays_ctx;
 };
 
 // Install the front-end interface (see struct gpu_next_core_frontend).
@@ -213,6 +227,31 @@ enum pl_queue_status gpu_next_core_queue_update(struct gpu_next_core *core,
 // gpu_next_core_queue_update); the screenshot path reads it back to
 // retrieve the current frame.
 double gpu_next_core_queue_last_pts(struct gpu_next_core *core);
+
+// Per-source-frame finalisation for the draw path, run on the freshly
+// updated frame mix between gpu_next_core_queue_update and the render.
+// For every frame in the mix it applies the source crop, then either
+// refreshes the frame's blended-subtitle overlays when they have gone
+// stale (through the front-end's update_overlays hook, wrapped in the
+// optional "osd-blend-update" timer) or clears them when blend-subs is
+// off, and finally folds the per-frame OSD sync counter into the frame
+// signature so libplacebo treats an OSD change as a distinct frame.
+// src_crop / src_width / src_height are the front-end's source rect and
+// the unrotated source dimensions; redraw is the vo_frame.redraw flag,
+// which forces a blended-subs refresh on every queued frame. Centralising
+// the loop here lets the libmpv render backend reuse it; update_overlays
+// itself stays front-end-specific (it needs the front-end's OSD source).
+void gpu_next_core_update_frames(struct gpu_next_core *core,
+                                 const struct pl_frame_mix *mix,
+                                 const struct pl_frame *target,
+                                 struct mp_rect src_crop,
+                                 int src_width, int src_height, bool redraw);
+
+// Bump the OSD sync counter, invalidating every queued frame's cached
+// blended-subtitle overlay so gpu_next_core_update_frames re-blends it.
+// The front-end calls this when its OSD layout changes -- the windowed
+// VO does so on a resize that moves the src/dst/osd rects.
+void gpu_next_core_osd_changed(struct gpu_next_core *core);
 
 // Render a frame mix into target (the windowed VO's draw_frame path).
 // Swapchain-free: the front-end acquires target, drives the colorspace
