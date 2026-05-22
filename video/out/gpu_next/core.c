@@ -39,6 +39,7 @@
 #include "osdep/threads.h"
 #include "osdep/timer.h"
 #include "stream/stream.h"
+#include "sub/draw_bmp.h"
 #include "video/csputils.h"
 #include "video/mp_image.h"
 #include "video/out/gpu/hwdec.h"
@@ -244,6 +245,12 @@ struct gpu_next_core {
     // against frame_priv.osd_sync to decide whether a queued frame's cached
     // blended-subs overlay has gone stale and must be re-rendered.
     uint64_t osd_sync;
+
+    // OSD source and overlay texture formats for gpu_next_core_update_overlays.
+    // osd is the front-end's osd_state, installed with gpu_next_core_set_osd;
+    // osd_fmt[] is resolved from the gpu in gpu_next_core_create.
+    struct osd_state *osd;
+    pl_fmt osd_fmt[SUBBITMAP_COUNT];
 
     // Front-end interface (see gpu_next_core_set_frontend), reached by the
     // core's frame-ingest callbacks for genuinely front-end-specific
@@ -471,6 +478,8 @@ struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
     core->rr = pl_renderer_create(pllog, gpu);
     core->queue = pl_queue_create(gpu);
     core->osd_sync = 1;
+    core->osd_fmt[SUBBITMAP_LIBASS] = pl_find_named_fmt(gpu, "r8");
+    core->osd_fmt[SUBBITMAP_BGRA] = pl_find_named_fmt(gpu, "bgra8");
     mp_mutex_init(&core->dr_lock);
     return core;
 }
@@ -502,6 +511,11 @@ void gpu_next_core_set_image_lut(struct gpu_next_core *core,
 {
     core->image_lut = lut;
     core->image_lut_type = type;
+}
+
+void gpu_next_core_set_osd(struct gpu_next_core *core, struct osd_state *osd)
+{
+    core->osd = osd;
 }
 
 static void info_callback(void *priv, const struct pl_render_info *info)
@@ -1594,6 +1608,160 @@ void gpu_next_core_discard_frame(const struct pl_source_frame *src)
     talloc_free(mpi);
 }
 
+void gpu_next_core_update_overlays(struct gpu_next_core *core,
+                                   struct mp_osd_res res, int flags,
+                                   enum pl_overlay_coords coords,
+                                   struct gpu_next_osd_state *state,
+                                   struct pl_frame *frame,
+                                   struct mp_image *src, int stereo_mode)
+{
+    frame->overlays = state->overlays;
+    frame->num_overlays = 0;
+    if (!core->osd)
+        return;
+
+    const struct gl_next_opts *next_opts = core->fe.next_opts;
+    double pts = src ? src->pts : 0;
+    int div[2];
+    mp_get_3d_side_by_side(stereo_mode, div);
+    res.w /= div[0];
+    res.h /= div[1];
+    struct sub_bitmap_list *subs = osd_render(core->osd, res, pts, flags,
+                                              mp_draw_sub_formats);
+
+    for (int n = 0; n < subs->num_items; n++) {
+        const struct sub_bitmaps *item = subs->items[n];
+        if (!item->num_parts || !item->packed)
+            continue;
+        struct gpu_next_osd_entry *entry = &state->entries[item->render_index];
+        pl_fmt tex_fmt = core->osd_fmt[item->format];
+        if (!entry->tex)
+            entry->tex = gpu_next_core_sub_tex_pop(core);
+        bool ok = pl_tex_recreate(core->gpu, &entry->tex, &(struct pl_tex_params) {
+            .format = tex_fmt,
+            .w = MPMAX(item->packed_w, entry->tex ? entry->tex->params.w : 0),
+            .h = MPMAX(item->packed_h, entry->tex ? entry->tex->params.h : 0),
+            .host_writable = true,
+            .sampleable = true,
+        });
+        if (!ok) {
+            MP_ERR(core, "Failed recreating OSD texture!\n");
+            break;
+        }
+        struct pl_tex_transfer_params upload_params = {
+            .tex        = entry->tex,
+            .rc         = { .x1 = item->packed_w, .y1 = item->packed_h, },
+            .row_pitch  = item->packed->stride[0],
+            .ptr        = item->packed->planes[0],
+        };
+        // Keep the image alive until it's fully read.
+        if (core->gpu->limits.callbacks) {
+            upload_params.callback = talloc_free;
+            upload_params.priv = mp_image_new_ref(item->packed);
+        }
+        ok = pl_tex_upload(core->gpu, &upload_params);
+        if (!ok) {
+            MP_ERR(core, "Failed uploading OSD texture!\n");
+            talloc_free(upload_params.priv);
+            break;
+        }
+
+        entry->num_parts = 0;
+        for (int i = 0; i < item->num_parts; i++) {
+            const struct sub_bitmap *b = &item->parts[i];
+            if (b->dw == 0 || b->dh == 0)
+                continue;
+            uint32_t c = b->libass.color;
+            struct pl_overlay_part part = {
+                .src = { b->src_x, b->src_y, b->src_x + b->w, b->src_y + b->h },
+                .dst = { b->x, b->y, b->x + b->dw, b->y + b->dh },
+                .color = {
+                    (c >> 24) / 255.0f,
+                    ((c >> 16) & 0xFF) / 255.0f,
+                    ((c >> 8) & 0xFF) / 255.0f,
+                    (255 - (c & 0xFF)) / 255.0f,
+                }
+            };
+            MP_TARRAY_APPEND(core, entry->parts, entry->num_parts, part);
+        }
+
+        struct pl_overlay *ol = &state->overlays[frame->num_overlays++];
+        *ol = (struct pl_overlay) {
+            .tex = entry->tex,
+            .parts = entry->parts,
+            .num_parts = entry->num_parts,
+            .color = pl_color_space_srgb,
+            .coords = coords,
+        };
+
+        switch (item->format) {
+        case SUBBITMAP_BGRA:
+            ol->mode = PL_OVERLAY_NORMAL;
+            ol->repr.alpha = PL_ALPHA_PREMULTIPLIED;
+            // Infer bitmap colorspace from source
+            if (src) {
+                ol->color = src->params.color;
+                if (pl_color_transfer_is_hdr(ol->color.transfer)) {
+                    bool use_static = next_opts->image_subs_hdr_peak == -2;
+                    if (use_static || next_opts->image_subs_hdr_peak == -3) {
+                        float max;
+                        pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+                            .color      = &ol->color,
+                            .metadata   = use_static ? PL_HDR_METADATA_HDR10 : PL_HDR_METADATA_ANY,
+                            .scaling    = PL_HDR_NITS,
+                            .out_max    = &max,
+                        ));
+                        ol->color.hdr = (struct pl_hdr_metadata) {
+                            .max_luma = max,
+                        };
+                    } else if (next_opts->image_subs_hdr_peak != -1) {
+                        ol->color.hdr = (struct pl_hdr_metadata) {
+                            .max_luma = next_opts->image_subs_hdr_peak,
+                        };
+                    }
+                }
+            }
+            break;
+        case SUBBITMAP_LIBASS:
+            if (src && item->video_color_space && !pl_color_space_is_hdr(&src->params.color))
+                ol->color = src->params.color;
+            if (src && pl_color_transfer_is_hdr(frame->color.transfer)) {
+                ol->color.hdr = (struct pl_hdr_metadata) {
+                    .max_luma = next_opts->sub_hdr_peak,
+                };
+            }
+            ol->mode = PL_OVERLAY_MONOCHROME;
+            ol->repr.alpha = PL_ALPHA_INDEPENDENT;
+            break;
+        }
+
+        // Duplicate overlay parts for each eye in stereo 3D modes
+        if (div[0] > 1 || div[1] > 1) {
+            int orig_num = entry->num_parts;
+            for (int x = 0; x < div[0]; x++) {
+                for (int y = 0; y < div[1]; y++) {
+                    if (x == 0 && y == 0)
+                        continue;
+                    float off_x = res.w * x;
+                    float off_y = res.h * y;
+                    for (int i = 0; i < orig_num; i++) {
+                        struct pl_overlay_part duped = entry->parts[i];
+                        duped.dst.x0 += off_x;
+                        duped.dst.x1 += off_x;
+                        duped.dst.y0 += off_y;
+                        duped.dst.y1 += off_y;
+                        MP_TARRAY_APPEND(core, entry->parts, entry->num_parts, duped);
+                    }
+                }
+            }
+            ol->parts = entry->parts;
+            ol->num_parts = entry->num_parts;
+        }
+    }
+
+    talloc_free(subs);
+}
+
 void gpu_next_core_osd_changed(struct gpu_next_core *core)
 {
     core->osd_sync++;
@@ -1635,15 +1803,13 @@ void gpu_next_core_update_frames(struct gpu_next_core *core,
                 };
                 enum pl_overlay_coords rel = opts->blend_subs == BLEND_SUBS_VIDEO
                     ? PL_OVERLAY_COORDS_SRC_CROP : PL_OVERLAY_COORDS_DST_CROP;
-                if (core->fe.update_overlays) {
-                    if (core->fe.timer_start)
-                        core->fe.timer_start(core->fe.timer_ctx, "osd-blend-update");
-                    core->fe.update_overlays(core->fe.overlays_ctx, res,
-                                             OSD_DRAW_SUB_ONLY, rel, &fp->subs,
-                                             image, mpi, mpi->params.stereo3d);
-                    if (core->fe.timer_end)
-                        core->fe.timer_end(core->fe.timer_ctx, "osd-blend-update");
-                }
+                if (core->fe.timer_start)
+                    core->fe.timer_start(core->fe.timer_ctx, "osd-blend-update");
+                gpu_next_core_update_overlays(core, res, OSD_DRAW_SUB_ONLY, rel,
+                                              &fp->subs, image, mpi,
+                                              mpi->params.stereo3d);
+                if (core->fe.timer_end)
+                    core->fe.timer_end(core->fe.timer_ctx, "osd-blend-update");
                 fp->osd_sync = core->osd_sync;
             }
         } else {
