@@ -993,9 +993,12 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
 {
     pl_gpu gpu = core->gpu;
 
-    if (!core->sw_upload_timer)
+    // Front-ends without an ra_ctx (the libmpv render backend) cannot
+    // create a timer_pool, so the SW-upload sample stays at zero there.
+    if (ra && !core->sw_upload_timer)
         core->sw_upload_timer = timer_pool_create(ra);
-    timer_pool_start(core->sw_upload_timer);
+    if (core->sw_upload_timer)
+        timer_pool_start(core->sw_upload_timer);
 
     struct pl_plane_data data[4] = {0};
     bool use_uint = false;
@@ -1039,7 +1042,8 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
             MP_ERR(core, "Failed uploading frame!\n");
             talloc_free(data[n].priv);
             talloc_free(mpi);
-            timer_pool_stop(core->sw_upload_timer);
+            if (core->sw_upload_timer)
+                timer_pool_stop(core->sw_upload_timer);
             return false;
         }
 
@@ -1048,8 +1052,10 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
             while (pl_buf_poll(gpu, data[n].buf, UINT64_MAX));
     }
 
-    timer_pool_stop(core->sw_upload_timer);
-    core->sw_upload_perf = timer_pool_measure(core->sw_upload_timer);
+    if (core->sw_upload_timer) {
+        timer_pool_stop(core->sw_upload_timer);
+        core->sw_upload_perf = timer_pool_measure(core->sw_upload_timer);
+    }
     return true;
 }
 
