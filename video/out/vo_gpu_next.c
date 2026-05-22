@@ -130,27 +130,6 @@ static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
     return false;
 }
 
-static void update_tm_viz(struct pl_color_map_params *params,
-                          const struct pl_frame *target)
-{
-    if (!params->visualize_lut)
-        return;
-
-    // Use right half of screen for TM visualization, constrain to 1:1 AR
-    const float out_w = fabsf(pl_rect_w(target->crop));
-    const float out_h = fabsf(pl_rect_h(target->crop));
-    const float size = MPMIN(out_w / 2.0f, out_h);
-    params->visualize_rect = (pl_rect2df) {
-        .x0 = 1.0f - size / out_w,
-        .x1 = 1.0f,
-        .y0 = 0.0f,
-        .y1 = size / out_h,
-    };
-
-    // Visualize red-blue plane
-    params->visualize_hue = M_PI / 4.0;
-}
-
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
@@ -248,54 +227,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     int fallback_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0;
     gpu_next_core_apply_target_options(p->core, &target, hint.hdr.min_luma,
                                        strict_sw_params, fallback_depth);
-    bool clip_gamut = pl_primaries_valid(&target.color.hdr.prim);
-#if PL_API_VER >= 362
-    clip_gamut = clip_gamut && target.color.transfer != PL_COLOR_TRC_SCRGB;
-#endif
-    if (clip_gamut) {
-        // Ensure resulting gamut still fits inside container
-        target.color.hdr.prim = pl_primaries_clip(&target.color.hdr.prim,
-                                    pl_raw_primaries_get(target.color.primaries));
-    }
-    if (target.color.transfer == PL_COLOR_TRC_SRGB && frame->current &&
-        ((opts->sdr_adjust_gamma == 0 && opts->target_trc == PL_COLOR_TRC_UNKNOWN) ||
-         opts->sdr_adjust_gamma == -1))
-    {
-        switch (frame->current->params.color.transfer) {
-        case PL_COLOR_TRC_BT_1886:
-        case PL_COLOR_TRC_GAMMA22:
-        case PL_COLOR_TRC_SRGB:
-            target.color.transfer = frame->current->params.color.transfer;
-        }
-    }
-    if (target.color.transfer == PL_COLOR_TRC_SRGB) {
-        // sRGB reference display is pure 2.2 power function, see IEC 61966-2-1-1999.
-        if (opts->treat_srgb_as_power22 & 2)
-            target.color.transfer = PL_COLOR_TRC_GAMMA22;
-
-        // TODO: Vulkan on Wayland currently interprets VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-        // in ambiguous way, depending if compositor advertises sRGB support.
-        // There is currently no clear path forward to resolve this ambiguity.
-        // Depending how it's resolved in Wayland Protocol, Mesa, things will
-        // change.
-        // See: <https://gitlab.freedesktop.org/wayland/wayland-protocols/-/merge_requests/456>
-#ifdef _WIN32
-        // Windows uses the sRGB piecewise function. Send piecewise sRGB to
-        // Windows in HDR mode so that it can be converted to PQ, the same way
-        // as mpv does internally. Note that in SDR mode, even with ACM enabled,
-        // Windows assumes the display is sRGB. It doesn't perform gamma
-        // conversion, or any conversions would roundtrip back to sRGB.
-        // In which case the EOTF depends on the display.
-        // Ideally, compositors would agree on how to handle sRGB, but I’ll
-        // leave that part of the story for the reader to explore.
-        // Note: Older Windows versions, without ACM, were not able to convert
-        // sRGB to PQ output. We are not concerned about this case, as it would
-        // look wrong anyway.
-        bool target_pq = !target_unknown && target_csp.transfer == PL_COLOR_TRC_PQ;
-        if (opts->treat_srgb_as_power22 & 4 && target_pq)
-            target.color.transfer = PL_COLOR_TRC_SRGB;
-#endif
-    }
+    gpu_next_core_finalize_target_csp(p->core, &target, frame->current,
+                                      &target_csp, target_unknown);
     stats_time_start(p->stats, "osd-update");
     gpu_next_core_update_overlays(p->core, p->osd_res,
                                  (frame->current && opts->blend_subs) ? OSD_DRAW_OSD_ONLY : 0,
@@ -304,7 +237,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     stats_time_end(p->stats, "osd-update");
     gpu_next_core_apply_crop(&target, p->dst, swframe.fbo->params.w,
                              swframe.fbo->params.h);
-    update_tm_viz(&pars->color_map_params, &target);
+    gpu_next_core_update_tm_viz(p->core, &target);
 
     struct pl_frame_mix mix = {0};
     if (frame->current) {
@@ -621,7 +554,7 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
 
     gpu_next_core_apply_crop(&image, src, mpi->params.w, mpi->params.h);
     gpu_next_core_apply_crop(&target, dst, fbo->params.w, fbo->params.h);
-    update_tm_viz(&pars->color_map_params, &target);
+    gpu_next_core_update_tm_viz(p->core, &target);
 
     int osd_flags = 0;
     if (!args->subs)
