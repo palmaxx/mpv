@@ -136,11 +136,12 @@ void gpu_next_core_apply_target_icc(struct gpu_next_core *core,
 // copy. This mirrors mpv's existing shared-core/two-front-end interfaces
 // (render_backend_fns, libmpv_gpu_context_fns).
 struct gpu_next_core_frontend {
-    // Resolved gl_video_opts. This is the stable m_config_cache->opts
-    // pointer -- m_config_cache_update() copies new values into the same
-    // buffer -- so the core may hold it for its whole lifetime and read
-    // live option values at map time.
+    // Resolved gl_video_opts / gl_next_opts. These are the stable
+    // m_config_cache->opts pointers -- m_config_cache_update() copies new
+    // values into the same buffer -- so the core may hold them for its
+    // whole lifetime and read live option values at map / overlay time.
     const struct gl_video_opts *opts;
+    const struct gl_next_opts *next_opts;
 
     // RA handle, used to lazily create the SW-upload / hwdec perf timers
     // and to wrap hwdec plane textures.
@@ -158,19 +159,6 @@ struct gpu_next_core_frontend {
     // time (mirroring ra_hwdec_get). NULL means SW decoding only.
     struct ra_hwdec *(*hwdec_get)(void *ctx, int imgfmt);
     void *hwdec_ctx;
-
-    // Blend the front-end's OSD/subtitle source onto a frame. The core's
-    // per-frame loop (gpu_next_core_update_frames) calls this for each
-    // queued frame whose cached blended-subtitle overlay has gone stale.
-    // The windowed VO wraps its update_overlays (which reaches vo->osd);
-    // a future libmpv render backend wraps its own OSD source. NULL
-    // leaves blended subtitles unrendered.
-    void (*update_overlays)(void *ctx, struct mp_osd_res res, int flags,
-                            enum pl_overlay_coords coords,
-                            struct gpu_next_osd_state *state,
-                            struct pl_frame *frame, struct mp_image *src,
-                            int stereo_mode);
-    void *overlays_ctx;
 };
 
 // Install the front-end interface (see struct gpu_next_core_frontend).
@@ -186,6 +174,12 @@ void gpu_next_core_set_frontend(struct gpu_next_core *core,
 void gpu_next_core_set_image_lut(struct gpu_next_core *core,
                                  struct pl_custom_lut *lut,
                                  enum pl_lut_type type);
+
+// Install the front-end's OSD source (struct osd_state). The core reads
+// it in gpu_next_core_update_overlays. The windowed VO sets vo->osd once
+// at preinit; the libmpv render backend sets the OSD source it receives
+// through update_external (and clears it with NULL).
+void gpu_next_core_set_osd(struct gpu_next_core *core, struct osd_state *osd);
 
 // libplacebo OSD overlay state for one frame's worth of subtitle/OSD
 // bitmaps: a recyclable texture plus its built pl_overlay parts, per OSD
@@ -316,15 +310,13 @@ double gpu_next_core_queue_last_pts(struct gpu_next_core *core);
 // updated frame mix between gpu_next_core_queue_update and the render.
 // For every frame in the mix it applies the source crop, then either
 // refreshes the frame's blended-subtitle overlays when they have gone
-// stale (through the front-end's update_overlays hook, wrapped in the
-// optional "osd-blend-update" timer) or clears them when blend-subs is
-// off, and finally folds the per-frame OSD sync counter into the frame
-// signature so libplacebo treats an OSD change as a distinct frame.
-// src_crop / src_width / src_height are the front-end's source rect and
-// the unrotated source dimensions; redraw is the vo_frame.redraw flag,
-// which forces a blended-subs refresh on every queued frame. Centralising
-// the loop here lets the libmpv render backend reuse it; update_overlays
-// itself stays front-end-specific (it needs the front-end's OSD source).
+// stale (gpu_next_core_update_overlays, wrapped in the optional
+// "osd-blend-update" timer) or clears them when blend-subs is off, and
+// finally folds the per-frame OSD sync counter into the frame signature
+// so libplacebo treats an OSD change as a distinct frame. src_crop /
+// src_width / src_height are the front-end's source rect and the
+// unrotated source dimensions; redraw is the vo_frame.redraw flag, which
+// forces a blended-subs refresh on every queued frame.
 void gpu_next_core_update_frames(struct gpu_next_core *core,
                                  const struct pl_frame_mix *mix,
                                  const struct pl_frame *target,
@@ -521,17 +513,29 @@ struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
                                              struct mpv_global *global,
                                              const char *path);
 
-// OSD overlay-texture recycle pool. The front-end's libplacebo unmap
-// callback hands the per-frame OSD textures back to the pool when a
-// source frame is released (sub_tex_push), and the front-end's overlay
-// updater pops a recyclable tex when building the next frame's overlays
-// (sub_tex_pop, returns NULL when empty -- the caller then allocates
-// fresh). The pool is destroyed in gpu_next_core_destroy. The rest of
-// the OSD path (osd_render via vo->osd, p->osd_fmt[], the per-frame
-// frame_priv.subs cache, p->osd_state) stays with the front-end since
-// it is front-end-specific.
+// OSD overlay-texture recycle pool. gpu_next_core_unmap_frame hands a
+// released source frame's OSD textures back to the pool (sub_tex_push),
+// and gpu_next_core_update_overlays pops a recyclable tex when building
+// the next frame's overlays (sub_tex_pop, returns NULL when empty -- the
+// caller then allocates fresh). The pool is destroyed in
+// gpu_next_core_destroy.
 void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex);
 pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core);
+
+// Render the front-end's OSD/subtitle bitmaps (osd_render over the OSD
+// source set with gpu_next_core_set_osd) into *frame as pl_overlays,
+// recycling textures through the sub_tex pool. flags are OSD_DRAW_*;
+// coords selects the libplacebo overlay coordinate space; state is the
+// per-frame (blended subs) or front-end (main OSD) overlay cache; src is
+// the current source frame (NULL for none), used to infer subtitle
+// colorspaces; stereo_mode duplicates overlays per eye. A NULL OSD
+// source leaves frame->num_overlays at 0.
+void gpu_next_core_update_overlays(struct gpu_next_core *core,
+                                   struct mp_osd_res res, int flags,
+                                   enum pl_overlay_coords coords,
+                                   struct gpu_next_osd_state *state,
+                                   struct pl_frame *frame,
+                                   struct mp_image *src, int stereo_mode);
 
 // Resolve the gpu-next render options into the core's libplacebo
 // pl_options: scalers, frame mixer, deband / sigmoid / peak-detect /
