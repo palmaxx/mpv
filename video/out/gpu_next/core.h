@@ -85,9 +85,24 @@ extern const struct m_sub_options gl_next_conf;
 // scaler/user-shader state and the libplacebo options object.
 struct gpu_next_core;
 
+// Create the render core on an existing pl_gpu. global/opts drive the
+// on-disk shader and ICC object caches: opts gives the cache enable
+// flags and directories, and the core installs the shader cache on the
+// gpu (pl_gpu_set_cache) before creating the renderer, exactly as the
+// windowed VO's preinit did. opts may be NULL (both caches disabled) --
+// the libmpv render backend passes NULL until it resolves its own
+// gl_video_opts.
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
-                                           pl_log pllog);
+                                           pl_log pllog,
+                                           struct mpv_global *global,
+                                           const struct gl_video_opts *opts);
 void gpu_next_core_destroy(struct gpu_next_core **core);
+
+// The libplacebo ICC-object cache owned by the core, or NULL when ICC
+// caching is disabled. Transitional: the windowed VO still resolves ICC
+// profiles itself and needs this handle for pl_icc_params.cache; W5-3
+// moves the ICC state into the core and retires this accessor.
+pl_cache gpu_next_core_icc_cache(struct gpu_next_core *core);
 
 // Front-end-specific resources the core's frame-ingest callbacks
 // (map/unmap/discard) reach through, instead of a back-pointer to the

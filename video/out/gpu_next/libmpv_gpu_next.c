@@ -72,8 +72,10 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     if (err < 0)
         return err;
 
+    // opts is NULL: the render backend has not resolved its gl_video_opts
+    // yet, so the shader/ICC disk caches stay disabled until W5-6.
     p->core = gpu_next_core_create(p->context->gpu, ctx->log,
-                                   p->context->pllog);
+                                   p->context->pllog, ctx->global, NULL);
     if (!p->core)
         return MPV_ERROR_GENERIC;
 

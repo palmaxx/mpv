@@ -18,7 +18,10 @@
 #include "core.h"
 
 #include <math.h>
+#include <sys/stat.h>
+#include <time.h>
 
+#include <libplacebo/cache.h>
 #include <libplacebo/filters.h>
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/lut.h>
@@ -27,11 +30,14 @@
 #include "config.h"
 #include "common/common.h"
 #include "common/msg.h"
+#include "misc/io_utils.h"
 #include "options/m_config.h"
 #include "options/m_option.h"
 #include "options/options.h"
 #include "options/path.h"
+#include "osdep/io.h"
 #include "osdep/threads.h"
+#include "osdep/timer.h"
 #include "stream/stream.h"
 #include "video/csputils.h"
 #include "video/mp_image.h"
@@ -121,10 +127,31 @@ struct frame_info {
     struct pl_dispatch_info info[VO_PASS_PERF_MAX];
 };
 
+// On-disk object cache for one libplacebo cache (the compiled-shader
+// cache or the ICC-profile cache): dir is the cache directory, name the
+// per-cache filename prefix, size_limit the cleanup threshold applied at
+// teardown.
+struct cache {
+    struct mp_log *log;
+    struct mpv_global *global;
+    char *dir;
+    const char *name;
+    size_t size_limit;
+    pl_cache cache;
+};
+
 struct gpu_next_core {
     pl_gpu gpu;
     pl_log pllog;
     struct mp_log *log;
+    struct mpv_global *global;
+
+    // On-disk libplacebo object caches. shader_cache is installed on the
+    // gpu (pl_gpu_set_cache) so the renderer's compiled shaders persist
+    // across runs; icc_cache backs pl_icc_params.cache. Both are created
+    // in gpu_next_core_create from the gl_video_opts cache options (when
+    // enabled) and cleaned up in gpu_next_core_destroy.
+    struct cache shader_cache, icc_cache;
 
     pl_options pars;
     pl_renderer rr;
@@ -203,19 +230,227 @@ struct gpu_next_core {
     enum pl_lut_type image_lut_type;
 };
 
+static char *cache_filepath(void *ta_ctx, char *dir, const char *prefix, uint64_t key)
+{
+    bstr filename = {0};
+    bstr_xappend_asprintf(ta_ctx, &filename, "%s_%016" PRIx64, prefix, key);
+    return mp_path_join_bstr(ta_ctx, bstr0(dir), filename);
+}
+
+static pl_cache_obj cache_load_obj(void *p, uint64_t key)
+{
+    struct cache *c = p;
+    void *ta_ctx = talloc_new(NULL);
+    pl_cache_obj obj = {0};
+
+    if (!c->dir)
+        goto done;
+
+    char *filepath = cache_filepath(ta_ctx, c->dir, c->name, key);
+    if (!filepath)
+        goto done;
+
+    if (stat(filepath, &(struct stat){0}))
+        goto done;
+
+    int64_t load_start = mp_time_ns();
+    struct bstr data = stream_read_file(filepath, ta_ctx, c->global, STREAM_MAX_READ_SIZE);
+    int64_t load_end = mp_time_ns();
+    MP_DBG(c, "%s: key(%" PRIx64 "), size(%zu), load time(%.3f ms)\n",
+           __func__, key, data.len,
+           MP_TIME_NS_TO_MS(load_end - load_start));
+
+    obj = (pl_cache_obj){
+        .key = key,
+        .data = talloc_steal(NULL, data.start),
+        .size = data.len,
+        .free = talloc_free,
+    };
+
+done:
+    talloc_free(ta_ctx);
+    return obj;
+}
+
+static void cache_save_obj(void *p, pl_cache_obj obj)
+{
+    const struct cache *c = p;
+    void *ta_ctx = talloc_new(NULL);
+
+    if (!c->dir)
+        goto done;
+
+    char *filepath = cache_filepath(ta_ctx, c->dir, c->name, obj.key);
+    if (!filepath)
+        goto done;
+
+    if (!obj.data || !obj.size) {
+        unlink(filepath);
+        goto done;
+    }
+
+    // Don't save if already exists
+    struct stat st;
+    if (!stat(filepath, &st) && st.st_size == obj.size) {
+        MP_DBG(c, "%s: key(%"PRIx64"), size(%zu)\n", __func__, obj.key, obj.size);
+        goto done;
+    }
+
+    int64_t save_start = mp_time_ns();
+    mp_save_to_file(filepath, obj.data, obj.size);
+    int64_t save_end = mp_time_ns();
+    MP_DBG(c, "%s: key(%" PRIx64 "), size(%zu), save time(%.3f ms)\n",
+           __func__, obj.key, obj.size,
+           MP_TIME_NS_TO_MS(save_end - save_start));
+
+done:
+    talloc_free(ta_ctx);
+}
+
+static void cache_init(struct gpu_next_core *core, struct cache *cache,
+                       const char *dir_opt)
+{
+    const char *name = cache == &core->shader_cache ? "shader" : "icc";
+    const size_t limit = cache == &core->shader_cache ? 128 << 20 : 1536 << 20;
+
+    char *dir;
+    if (dir_opt && dir_opt[0]) {
+        dir = mp_get_user_path(core, core->global, dir_opt);
+    } else {
+        dir = mp_find_user_file(core, core->global, "cache", "");
+    }
+    if (!dir || !dir[0])
+        return;
+
+    mp_mkdirp(dir);
+    *cache = (struct cache){
+        .log        = core->log,
+        .global     = core->global,
+        .dir        = dir,
+        .name       = name,
+        .size_limit = limit,
+        .cache = pl_cache_create(pl_cache_params(
+            .log = core->pllog,
+            .get = cache_load_obj,
+            .set = cache_save_obj,
+            .priv = cache
+        )),
+    };
+}
+
+struct file_entry {
+    char *filepath;
+    size_t size;
+    time_t atime;
+};
+
+static int compare_atime(const void *a, const void *b)
+{
+    return (((struct file_entry *)b)->atime - ((struct file_entry *)a)->atime);
+}
+
+static void cache_uninit(struct cache *cache)
+{
+    if (!cache->cache)
+        return;
+
+    void *ta_ctx = talloc_new(NULL);
+    struct file_entry *files = NULL;
+    size_t num_files = 0;
+    mp_assert(cache->dir);
+    mp_assert(cache->name);
+
+    DIR *d = opendir(cache->dir);
+    if (!d)
+        goto done;
+
+    struct dirent *dir;
+    while ((dir = readdir(d)) != NULL) {
+        char *filepath = mp_path_join(ta_ctx, cache->dir, dir->d_name);
+        if (!filepath)
+            continue;
+        struct stat filestat;
+        if (stat(filepath, &filestat))
+            continue;
+        if (!S_ISREG(filestat.st_mode))
+            continue;
+        bstr fname = bstr0(dir->d_name);
+        if (!bstr_eatstart0(&fname, cache->name))
+            continue;
+        if (!bstr_eatstart0(&fname, "_"))
+            continue;
+        if (fname.len != 16) // %016x
+            continue;
+        MP_TARRAY_APPEND(ta_ctx, files, num_files,
+                         (struct file_entry){
+                             .filepath = filepath,
+                             .size     = filestat.st_size,
+                             .atime    = filestat.st_atime,
+                         });
+    }
+    closedir(d);
+
+    if (!num_files)
+        goto done;
+
+    qsort(files, num_files, sizeof(struct file_entry), compare_atime);
+
+    time_t t = time(NULL);
+    size_t cache_size = 0;
+    size_t cache_limit = cache->size_limit ? cache->size_limit : SIZE_MAX;
+    for (int i = 0; i < num_files; i++) {
+        // Remove files that exceed the size limit but are older than one day.
+        // This allows for temporary maintaining a larger cache size while
+        // adjusting the configuration. The cache will be cleared the next day
+        // for unused entries. We don't need to be overly aggressive with cache
+        // cleaning; in most cases, it will not grow much, and in others, it may
+        // actually be useful to cache more.
+        cache_size += files[i].size;
+        double rel_use = difftime(t, files[i].atime);
+        if (cache_size > cache_limit && rel_use > 60 * 60 * 24) {
+            MP_VERBOSE(cache, "Removing %s | size: %9zu bytes | last used: %9d seconds ago\n",
+                       files[i].filepath, files[i].size, (int)rel_use);
+            unlink(files[i].filepath);
+        }
+    }
+
+done:
+    talloc_free(ta_ctx);
+    pl_cache_destroy(&cache->cache);
+}
+
 struct gpu_next_core *gpu_next_core_create(pl_gpu gpu, struct mp_log *log,
-                                           pl_log pllog)
+                                           pl_log pllog,
+                                           struct mpv_global *global,
+                                           const struct gl_video_opts *opts)
 {
     struct gpu_next_core *core = talloc_zero(NULL, struct gpu_next_core);
     core->gpu = gpu;
     core->pllog = pllog;
     core->log = log;
+    core->global = global;
     core->pars = pl_options_alloc(pllog);
+
+    // Set up the on-disk object caches and install the shader cache on the
+    // gpu before creating the renderer, mirroring the windowed VO's preinit.
+    if (opts) {
+        if (opts->shader_cache)
+            cache_init(core, &core->shader_cache, opts->shader_cache_dir);
+        if (opts->icc_opts->cache)
+            cache_init(core, &core->icc_cache, opts->icc_opts->cache_dir);
+    }
+    pl_gpu_set_cache(gpu, core->shader_cache.cache);
+
     core->rr = pl_renderer_create(pllog, gpu);
     core->queue = pl_queue_create(gpu);
     core->osd_sync = 1;
     mp_mutex_init(&core->dr_lock);
     return core;
+}
+
+pl_cache gpu_next_core_icc_cache(struct gpu_next_core *core)
+{
+    return core->icc_cache.cache;
 }
 
 pl_options gpu_next_core_options(struct gpu_next_core *core)
@@ -514,6 +749,14 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
 
     pl_renderer_destroy(&core->rr);
     pl_options_free(&core->pars);
+
+    // Trim the on-disk caches and destroy the pl_cache objects. The gpu
+    // still references the (now-destroyed) shader cache, but nothing
+    // dispatches between here and the front-end destroying the gpu, so
+    // the dangling pointer is never read -- the same window mainline's
+    // uninit relied on.
+    cache_uninit(&core->shader_cache);
+    cache_uninit(&core->icc_cache);
 
     talloc_free(core);
     *core_ptr = NULL;
