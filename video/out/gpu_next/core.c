@@ -357,6 +357,24 @@ bool gpu_next_core_queue_accept(struct gpu_next_core *core, int id)
     return true;
 }
 
+void gpu_next_core_queue_push(struct gpu_next_core *core,
+                              struct mp_image *src, double duration)
+{
+    struct mp_image *mpi = mp_image_new_ref(src);
+    struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
+    mpi->priv = fp;
+    fp->core = core;
+
+    pl_queue_push(core->queue, &(struct pl_source_frame) {
+        .pts = mpi->pts,
+        .duration = duration,
+        .frame_data = mpi,
+        .map = gpu_next_core_map_frame,
+        .unmap = gpu_next_core_unmap_frame,
+        .discard = gpu_next_core_discard_frame,
+    });
+}
+
 void gpu_next_core_queue_request_reset(struct gpu_next_core *core)
 {
     core->want_reset = true;

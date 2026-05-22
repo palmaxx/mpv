@@ -527,19 +527,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         if (!gpu_next_core_queue_accept(p->core, id))
             continue;
 
-        struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
-        struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
-        mpi->priv = fp;
-        fp->core = p->core;
-
-        pl_queue_push(gpu_next_core_queue(p->core), &(struct pl_source_frame) {
-            .pts = mpi->pts,
-            .duration = can_interpolate ? frame->approx_duration : 0,
-            .frame_data = mpi,
-            .map = gpu_next_core_map_frame,
-            .unmap = gpu_next_core_unmap_frame,
-            .discard = gpu_next_core_discard_frame,
-        });
+        gpu_next_core_queue_push(p->core, frame->frames[n],
+                                 can_interpolate ? frame->approx_duration : 0);
     }
 
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
