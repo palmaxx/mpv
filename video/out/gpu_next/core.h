@@ -205,9 +205,8 @@ struct gpu_next_osd_state {
 
 // Per-source-frame private data, hung off mp_image->priv for every frame
 // pushed into the queue and allocated as a talloc child of that mp_image
-// by the front-end's push loop. Visible to both the core (its map/unmap
-// callbacks) and the front-end (its per-frame overlay loop, VO-side
-// until E6).
+// by gpu_next_core_queue_push. Used by the core's map/unmap callbacks;
+// the front-end's screenshot path reads frame_priv.subs back.
 struct frame_priv {
     // Back-reference to the owning core, set by the front-end at push.
     struct gpu_next_core *core;
@@ -436,11 +435,6 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
 // one: pl_queue holds the source-frame's mpi ref until unmap, and the
 // additional ref held for the async-callback path is released by
 // libplacebo when it is done with the buffer.
-//
-// The hwdec branch of map_frame and the per-frame frame_priv plumbing
-// (hwdec acquire/release, OSD subs cache, info_callback) stay with the
-// front-end and remain hwdec-rig-deferred — lavapipe cannot honestly
-// verify hwdec.
 bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
                                     struct ra *ra,
                                     struct mp_image *mpi,
