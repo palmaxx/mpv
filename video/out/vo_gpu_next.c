@@ -106,57 +106,6 @@ static void update_options(struct vo *vo)
     gpu_next_core_update_options(p->core, p->opts_cache->opts, p->next_opts);
 }
 
-static void apply_target_contrast(struct priv *p, struct pl_color_space *color, float min_luma)
-{
-    gpu_next_core_apply_target_contrast(p->opts_cache->opts, color, min_luma);
-}
-
-static void apply_target_options(struct priv *p, struct pl_frame *target,
-                                 float min_luma, bool hint)
-{
-    gpu_next_core_update_lut(p->core, &p->next_opts->target_lut);
-    target->lut = p->next_opts->target_lut.lut;
-    target->lut_type = p->next_opts->target_lut.type;
-
-    // Colorspace overrides
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-    // If swapchain returned a value use this, override is used in hint
-    enum pl_color_levels output_levels = gpu_next_core_output_levels(p->core);
-    if (output_levels)
-        target->repr.levels = output_levels;
-    if (opts->target_prim && (!target->color.primaries || !hint))
-        target->color.primaries = opts->target_prim;
-    if (opts->target_trc && (!target->color.transfer || !hint))
-        target->color.transfer = opts->target_trc;
-    if (opts->target_peak && (!target->color.hdr.max_luma || !hint))
-        target->color.hdr.max_luma = opts->target_peak;
-    if (opts->hdr_reference_white && (!target->color.hdr.max_luma || !hint) &&
-        !pl_color_transfer_is_hdr(target->color.transfer)) {
-        target->color.hdr.max_luma = opts->hdr_reference_white;
-    }
-    if ((!target->color.hdr.min_luma || !hint))
-        apply_target_contrast(p, &target->color, min_luma);
-    if (opts->target_gamut)
-        mp_parse_raw_primaries(mp_null_log, opts->target_gamut, &target->color.hdr.prim);
-    int dither_depth = opts->dither_depth;
-    if (dither_depth == 0) {
-        struct ra_swapchain *sw = p->ra_ctx->swapchain;
-        dither_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0;
-    }
-#if PL_API_VER >= 362
-    // Don't dither scRGB, assume downstream will handle quantization properly.
-    if (target->color.transfer == PL_COLOR_TRC_SCRGB)
-        dither_depth = -1;
-#endif
-    if (dither_depth > 0) {
-        struct pl_bit_encoding *tbits = &target->repr.bits;
-        tbits->color_depth += dither_depth - tbits->sample_depth;
-        tbits->sample_depth = dither_depth;
-    }
-
-    gpu_next_core_apply_target_icc(p->core, target, opts->icc_opts->icc_use_luma);
-}
-
 static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
 {
     struct ra_swapchain *sw = p->ra_ctx->swapchain;
@@ -296,7 +245,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     if (external_params)
         target.color = hint;
     bool strict_sw_params = target_hint && p->next_opts->target_hint_strict;
-    apply_target_options(p, &target, hint.hdr.min_luma, strict_sw_params);
+    int fallback_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0;
+    gpu_next_core_apply_target_options(p->core, &target, hint.hdr.min_luma,
+                                       strict_sw_params, fallback_depth);
     bool clip_gamut = pl_primaries_valid(&target.color.hdr.prim);
 #if PL_API_VER >= 362
     clip_gamut = clip_gamut && target.color.transfer != PL_COLOR_TRC_SCRGB;
@@ -647,7 +598,10 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
     const struct gl_video_opts *opts = p->opts_cache->opts;
     if (args->scaled) {
         // Apply target LUT, ICC profile and CSP override only in window mode
-        apply_target_options(p, &target, 0, false);
+        struct ra_swapchain *sw = p->ra_ctx->swapchain;
+        int fallback_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0;
+        gpu_next_core_apply_target_options(p->core, &target, 0, false,
+                                           fallback_depth);
     } else if (args->native_csp) {
         target.color = image.color;
     } else {

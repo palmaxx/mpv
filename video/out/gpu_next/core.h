@@ -139,9 +139,10 @@ struct gpu_next_core_frontend {
     // Resolved gl_video_opts / gl_next_opts. These are the stable
     // m_config_cache->opts pointers -- m_config_cache_update() copies new
     // values into the same buffer -- so the core may hold them for its
-    // whole lifetime and read live option values at map / overlay time.
+    // whole lifetime. next_opts is non-const: the core resolves the
+    // user_lut path/lut trackers embedded in it.
     const struct gl_video_opts *opts;
-    const struct gl_next_opts *next_opts;
+    struct gl_next_opts *next_opts;
 
     // RA handle, used to lazily create the SW-upload / hwdec perf timers
     // and to wrap hwdec plane textures.
@@ -583,6 +584,19 @@ void gpu_next_core_update_hooks_dynamic(struct gpu_next_core *core,
 void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
                                          struct pl_color_space *color,
                                          float min_luma);
+
+// Resolve all target-frame options into *target: the target LUT, the
+// gl_video_opts colorspace / peak / contrast / gamut overrides, dither
+// depth and the ICC profile. min_luma feeds target-contrast; hint marks
+// a strict swapchain-negotiated target (the overrides are then only
+// applied to fields the swapchain left unset). fallback_depth is the
+// front-end's surface bit depth, used when --dither-depth is 0 (the
+// windowed VO's swapchain color_depth, the render API's
+// MPV_RENDER_PARAM_DEPTH).
+void gpu_next_core_apply_target_options(struct gpu_next_core *core,
+                                        struct pl_frame *target,
+                                        float min_luma, bool hint,
+                                        int fallback_depth);
 
 // Apply an mpv crop rect to a pl_frame's crop field (pure; no swapchain,
 // no core state). mpv hands us rotated/flipped rects while libplacebo
