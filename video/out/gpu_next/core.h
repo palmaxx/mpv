@@ -207,6 +207,17 @@ void gpu_next_core_queue_check_refill(struct gpu_next_core *core,
 // Returns true if the front-end should push this frame, false to skip it.
 bool gpu_next_core_queue_accept(struct gpu_next_core *core, int id);
 
+// Take a new reference to a decoded source frame, attach a fresh
+// frame_priv to it (a talloc child of the new ref, carrying the core
+// back-reference), and push it into the queue with the core's
+// map/unmap/discard callbacks. Called once per frame the front-end's
+// push loop has cleared through gpu_next_core_queue_accept(). duration is
+// the frame's approximate duration when interpolating, 0 otherwise.
+// Centralising the push here gives the libmpv render backend the exact
+// same frame-ingest entry with no source-frame plumbing of its own.
+void gpu_next_core_queue_push(struct gpu_next_core *core,
+                              struct mp_image *src, double duration);
+
 // Latch a deferred queue reset, honoured at the next
 // gpu_next_core_queue_accept(). Used by VOCTRL_RESET (seek) and on an
 // --image-lut change.
