@@ -423,6 +423,41 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Describes the colorspace of the render target surface, including HDR
+     * metadata. Valid for mpv_render_context_render().
+     * Type: mpv_render_param_target_colorspace*
+     *
+     * If supplied, the host informs mpv of the target surface's color
+     * primaries, transfer / EOTF, and HDR mastering / display metadata. The
+     * renderer treats this as the swapchain-equivalent baseline: user options
+     * (--target-prim, --target-trc, --target-peak, etc.) override only fields
+     * the host did not explicitly pin (i.e. left set to the AUTO / 0 sentinel).
+     *
+     * This is orthogonal to MPV_RENDER_PARAM_API_TYPE — any render backend may
+     * read it. When absent, the renderer falls back to sRGB defaults
+     * (existing PL_OPENGL behaviour).
+     *
+     * This is a per-frame parameter: hosts whose target colorspace varies
+     * (e.g. due to display HDR toggle, monitor change, swapchain re-creation)
+     * should pass the up-to-date value on every render call.
+     */
+    MPV_RENDER_PARAM_TARGET_COLORSPACE = 21,
+    /**
+     * Required parameters for initializing the libplacebo D3D11 backend.
+     * Valid for mpv_render_context_create().
+     * Type: mpv_d3d11_init_params*
+     *
+     * See render_d3d11.h.
+     */
+    MPV_RENDER_PARAM_D3D11_INIT_PARAMS = 22,
+    /**
+     * Describes a D3D11 render target. Valid for mpv_render_context_render().
+     * Type: mpv_d3d11_tex*
+     *
+     * See render_d3d11.h.
+     */
+    MPV_RENDER_PARAM_D3D11_TEX = 23,
 } mpv_render_param_type;
 
 /**
@@ -471,8 +506,123 @@ typedef struct mpv_render_param {
 // parameters), but renders through the libplacebo-based gpu-next pipeline
 // instead of the legacy gpu pipeline.
 #define MPV_RENDER_API_TYPE_PL_OPENGL "pl-opengl"
+// See render_d3d11.h. Renders through the libplacebo-based gpu-next pipeline
+// onto a host-provided ID3D11Texture2D, with HDR-capable target surfaces.
+#define MPV_RENDER_API_TYPE_PL_D3D11 "pl-d3d11"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
+
+/**
+ * Color primaries / chromaticities for MPV_RENDER_PARAM_TARGET_COLORSPACE.
+ *
+ * Mirrors mpv's existing "primaries" video-params property string set and the
+ * --target-prim option choices. The MPV_COLOR_PRIMARIES_AUTO sentinel (0)
+ * means the host doesn't pin the value; the renderer applies its default
+ * (and user --target-prim takes effect if set).
+ */
+typedef enum mpv_color_primaries {
+    MPV_COLOR_PRIMARIES_AUTO        = 0,
+    MPV_COLOR_PRIMARIES_BT_601_525,
+    MPV_COLOR_PRIMARIES_BT_601_625,
+    MPV_COLOR_PRIMARIES_BT_709,
+    MPV_COLOR_PRIMARIES_BT_470M,
+    MPV_COLOR_PRIMARIES_EBU_3213,
+    MPV_COLOR_PRIMARIES_BT_2020,
+    MPV_COLOR_PRIMARIES_APPLE,
+    MPV_COLOR_PRIMARIES_ADOBE,
+    MPV_COLOR_PRIMARIES_PRO_PHOTO,
+    MPV_COLOR_PRIMARIES_CIE_1931,
+    MPV_COLOR_PRIMARIES_DCI_P3,
+    MPV_COLOR_PRIMARIES_DISPLAY_P3,
+    MPV_COLOR_PRIMARIES_V_GAMUT,
+    MPV_COLOR_PRIMARIES_S_GAMUT,
+    MPV_COLOR_PRIMARIES_FILM_C,
+    MPV_COLOR_PRIMARIES_ACES_AP0,
+    MPV_COLOR_PRIMARIES_ACES_AP1,
+} mpv_color_primaries;
+
+/**
+ * Transfer function (EOTF) for MPV_RENDER_PARAM_TARGET_COLORSPACE.
+ *
+ * Mirrors mpv's existing "gamma" video-params property string set and the
+ * --target-trc option choices. MPV_COLOR_TRANSFER_PQ is HDR10 (SMPTE ST 2084),
+ * MPV_COLOR_TRANSFER_HLG is ARIB STD-B67.
+ */
+typedef enum mpv_color_transfer {
+    MPV_COLOR_TRANSFER_AUTO         = 0,
+    MPV_COLOR_TRANSFER_BT_1886,
+    MPV_COLOR_TRANSFER_SRGB,
+    MPV_COLOR_TRANSFER_LINEAR,
+    MPV_COLOR_TRANSFER_GAMMA18,
+    MPV_COLOR_TRANSFER_GAMMA20,
+    MPV_COLOR_TRANSFER_GAMMA22,
+    MPV_COLOR_TRANSFER_GAMMA24,
+    MPV_COLOR_TRANSFER_GAMMA26,
+    MPV_COLOR_TRANSFER_GAMMA28,
+    MPV_COLOR_TRANSFER_PRO_PHOTO,
+    MPV_COLOR_TRANSFER_ST428,
+    MPV_COLOR_TRANSFER_PQ,
+    MPV_COLOR_TRANSFER_HLG,
+    MPV_COLOR_TRANSFER_V_LOG,
+    MPV_COLOR_TRANSFER_S_LOG1,
+    MPV_COLOR_TRANSFER_S_LOG2,
+} mpv_color_transfer;
+
+/**
+ * HDR mastering / display metadata, embedded in
+ * mpv_render_param_target_colorspace.
+ *
+ * Values that are 0 are treated as "unknown" — the renderer will not override
+ * its defaults based on them. The host can pass an HDR10 swapchain's
+ * mastering metadata by filling at least max_luma + max_cll + max_fall;
+ * primary chromaticities can be left at zero to fall back to the
+ * primaries enum's canonical values.
+ */
+typedef struct mpv_hdr_metadata {
+    /**
+     * Mastering / display maximum luminance, in cd/m^2. Typical HDR10
+     * mastering metadata values: 1000, 4000, 10000.
+     */
+    float max_luma;
+    /**
+     * Mastering / display minimum luminance, in cd/m^2. Typical: 0.005 for
+     * OLED, 0.05 for LCD with local dimming.
+     */
+    float min_luma;
+    /**
+     * MaxCLL — maximum content light level, in cd/m^2.
+     */
+    float max_cll;
+    /**
+     * MaxFALL — maximum frame-average light level, in cd/m^2.
+     */
+    float max_fall;
+    /**
+     * Display primary chromaticities (CIE xy). Leave all four points at
+     * zero to use the canonical primaries from the mpv_color_primaries
+     * enum value instead.
+     */
+    struct { float x, y; } prim_red, prim_green, prim_blue, white_point;
+} mpv_hdr_metadata;
+
+/**
+ * For MPV_RENDER_PARAM_TARGET_COLORSPACE. All fields default to the AUTO /
+ * zero sentinel meaning "renderer uses its default for this field". A host
+ * pinning a HDR10 PQ target fills:
+ *
+ *   primaries  = MPV_COLOR_PRIMARIES_BT_2020;
+ *   transfer   = MPV_COLOR_TRANSFER_PQ;
+ *   hdr        = { .max_luma = 1000, .max_cll = 1000, .max_fall = 400 };
+ *
+ * Hosts that need a SDR sRGB target may pass an all-zero struct (equivalent
+ * to omitting MPV_RENDER_PARAM_TARGET_COLORSPACE entirely; the renderer
+ * applies its sRGB default).
+ */
+typedef struct mpv_render_param_target_colorspace {
+    mpv_color_primaries primaries;
+    mpv_color_transfer  transfer;
+    mpv_hdr_metadata    hdr;
+} mpv_render_param_target_colorspace;
 
 /**
  * Flags used in mpv_render_frame_info.flags. Each value represents a bit in it.
