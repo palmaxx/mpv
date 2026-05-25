@@ -1060,6 +1060,9 @@ features += {'d3d11': d3d11.allowed()}
 if features['d3d11']
     sources += files('video/out/d3d11/context.c',
                      'video/out/d3d11/ra_d3d11.c')
+    if libplacebo.get_variable('pl_has_d3d11', default_value: '0') == '1'
+        sources += files('video/out/d3d11/libmpv_pl_d3d11.c')
+    endif
 endif
 
 wayland = {
