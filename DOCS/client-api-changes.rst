@@ -32,6 +32,16 @@ API changes
 
 ::
 
+ 2.7    - add MPV_RENDER_API_TYPE_PL_D3D11 and the associated render parameters
+          MPV_RENDER_PARAM_D3D11_INIT_PARAMS and MPV_RENDER_PARAM_D3D11_TEX, plus
+          the new header render_d3d11.h. Wraps a host-provided ID3D11Device and
+          ID3D11Texture2D as a libplacebo target surface, enabling HDR-capable
+          render-API hosts on Windows.
+        - add MPV_RENDER_PARAM_TARGET_COLORSPACE and the
+          mpv_render_param_target_colorspace struct (plus the helper types
+          mpv_color_primaries, mpv_color_transfer, mpv_hdr_metadata) for
+          host-side target-surface colorspace and HDR metadata negotiation,
+          orthogonal to the chosen graphics API.
  2.6    - add MPV_RENDER_API_TYPE_PL_OPENGL, which exposes the libplacebo-based
           gpu-next renderer through the libmpv render API. See render.h and
           render_gl.h. Uses the same init/FBO params as MPV_RENDER_API_TYPE_OPENGL.
