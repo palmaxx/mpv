@@ -321,6 +321,9 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     int depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0);
     bool flip = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y, int, 0);
+    mpv_render_param_target_colorspace *target_cs =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_TARGET_COLORSPACE, NULL);
+    (void)target_cs;
 
     update_options(p);
 
