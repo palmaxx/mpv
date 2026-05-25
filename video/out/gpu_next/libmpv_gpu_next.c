@@ -38,10 +38,16 @@
 #if HAVE_GL && defined(PL_HAVE_OPENGL)
 extern const struct libmpv_pl_context_fns libmpv_pl_context_gl;
 #endif
+#if HAVE_D3D11 && defined(PL_HAVE_D3D11)
+extern const struct libmpv_pl_context_fns libmpv_pl_context_d3d11;
+#endif
 
 static const struct libmpv_pl_context_fns *context_backends[] = {
 #if HAVE_GL && defined(PL_HAVE_OPENGL)
     &libmpv_pl_context_gl,
+#endif
+#if HAVE_D3D11 && defined(PL_HAVE_D3D11)
+    &libmpv_pl_context_d3d11,
 #endif
     NULL,
 };

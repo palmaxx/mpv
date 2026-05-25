@@ -32,34 +32,98 @@ struct priv {
 
 static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
 {
-    // P1.2 stub: the file compiles and the const struct exists, but the
-    // backend is not yet registered in libmpv_gpu_next.c::context_backends[],
-    // so this entry point is unreachable from libmpv. Phase 2 implements
-    // the body (pl_d3d11_create against the host's ID3D11Device) and the
-    // registry entry.
-    (void)ctx;
-    (void)params;
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    ctx->priv = talloc_zero(NULL, struct priv);
+    struct priv *p = ctx->priv;
+
+    mpv_d3d11_init_params *init_params =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_D3D11_INIT_PARAMS, NULL);
+    if (!init_params || !init_params->device)
+        return MPV_ERROR_INVALID_PARAMETER;
+
+    ID3D11Device *device = (ID3D11Device *)init_params->device;
+    // The gpu-next renderer's compute-shader paths (peak detection, FSR,
+    // certain scalers) require D3D_FEATURE_LEVEL_11_0 functionality. Refuse
+    // 10level9 devices up-front rather than letting libplacebo fail late
+    // with a confusing capability error.
+    D3D_FEATURE_LEVEL fl = ID3D11Device_GetFeatureLevel(device);
+    if (fl < D3D_FEATURE_LEVEL_11_0) {
+        MP_FATAL(ctx, "D3D11 device feature level 0x%x is too low (need at "
+                      "least 0x%x for the gpu-next renderer).\n",
+                 (unsigned)fl, (unsigned)D3D_FEATURE_LEVEL_11_0);
+        return MPV_ERROR_UNSUPPORTED;
+    }
+
+    ctx->pllog = mppl_log_create(p, ctx->log);
+    if (!ctx->pllog)
+        return MPV_ERROR_GENERIC;
+
+    // Pass the host's device through; libplacebo takes its own COM reference
+    // on create and releases it in pl_d3d11_destroy. All other fields stay
+    // at PL_D3D11_DEFAULTS (allow_software = true, identical to the GL
+    // backend's policy of trusting the host's choice of GPU).
+    struct pl_d3d11_params pl_params = *pl_d3d11_params(
+        .device = device,
+    );
+    p->pl_d3d11 = pl_d3d11_create(ctx->pllog, &pl_params);
+    if (!p->pl_d3d11) {
+        MP_FATAL(ctx, "libplacebo D3D11 context creation failed.\n");
+        return MPV_ERROR_UNSUPPORTED;
+    }
+    ctx->gpu = p->pl_d3d11->gpu;
+    return 0;
 }
 
 static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out)
 {
-    (void)ctx;
-    (void)params;
-    (void)out;
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    struct priv *p = ctx->priv;
+
+    mpv_d3d11_tex *fbo =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_D3D11_TEX, NULL);
+    if (!fbo || !fbo->tex)
+        return MPV_ERROR_INVALID_PARAMETER;
+
+    // Free the previous wrap before producing a new one; pl_tex_destroy()
+    // is the documented teardown for pl_d3d11_wrap() (the wrapper holds one
+    // COM reference per wrap, released on pl_tex_destroy).
+    if (p->wrapped_fbo)
+        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+
+    // libplacebo introspects the ID3D11Texture2D for format / dimensions /
+    // bind flags; the host-supplied w/h are documentation-only and not
+    // forwarded (the wrap_params w/h field is only honoured for video
+    // resources like NV12/P010, which are not valid render targets).
+    p->wrapped_fbo = pl_d3d11_wrap(ctx->gpu, pl_d3d11_wrap_params(
+        .tex = (ID3D11Resource *)fbo->tex,
+    ));
+    if (!p->wrapped_fbo) {
+        MP_ERR(ctx, "Failed to wrap host D3D11 texture (%dx%d) as pl_tex.\n",
+               fbo->w, fbo->h);
+        return MPV_ERROR_UNSUPPORTED;
+    }
+    *out = p->wrapped_fbo;
+    return 0;
 }
 
 static void done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
-    (void)ctx;
-    (void)display_synced;
+    // The libmpv render API has no swapchain: the host owns surface
+    // presentation, so there is nothing to submit here. D3D11 command
+    // submission happens through libplacebo's immediate-context recording
+    // and is flushed by render_backend_gpu_next via pl_gpu_flush().
 }
 
 static void destroy(struct libmpv_pl_context *ctx)
 {
-    (void)ctx;
+    struct priv *p = ctx->priv;
+    if (!p)
+        return;
+    if (p->wrapped_fbo)
+        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+    if (p->pl_d3d11)
+        pl_d3d11_destroy(&p->pl_d3d11);
+    if (ctx->pllog)
+        pl_log_destroy(&ctx->pllog);
 }
 
 const struct libmpv_pl_context_fns libmpv_pl_context_d3d11 = {
