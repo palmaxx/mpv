@@ -25,6 +25,9 @@
 #include "mpv/render.h"
 #include "video/out/libmpv.h"
 
+struct ra;
+struct ra_ctx;
+
 // Per-GPU-API surface-wrap layer, parallel to libmpv_gpu_context_fns. Manages
 // the libplacebo-side interaction between libmpv and the host's render API
 // (init / wrap target surface / present), which is not something the renderer
@@ -39,6 +42,15 @@ struct libmpv_pl_context {
     // creates the renderer core via gpu_next_core_create(gpu, log, pllog).
     pl_log pllog;
     pl_gpu gpu;
+
+    // Populated by ->init() so the render backend can drive the existing
+    // ra_hwdec_ctx registry (hwdec interop on the libmpv render API). Each
+    // per-API context-fns produces the matching ra backend (ra_opengl for
+    // pl-opengl, ra_d3d11 for pl-d3d11) so the hwdec backends that gate on
+    // the ra type (e.g. ra_hwdec_d3d11egl, ra_hwdec_d3d11va) accept it. ra
+    // is a convenience accessor equal to ra_ctx->ra.
+    struct ra_ctx *ra_ctx;
+    struct ra *ra;
 
     void *priv;
 };
