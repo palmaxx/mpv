@@ -18,8 +18,12 @@
 #include <libplacebo/opengl.h>
 
 #include "common.h"
+#include "context.h"
 #include "mpv/render_gl.h"
+#include "options/m_config.h"
+#include "ra_gl.h"
 #include "ta/ta_talloc.h"
+#include "video/out/gpu/ra.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/placebo/utils.h"
 
@@ -46,6 +50,27 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
         MP_FATAL(ctx, "OpenGL not initialized.\n");
         return MPV_ERROR_UNSUPPORTED;
     }
+
+    // Build a blank ra_ctx alongside the libplacebo pl_opengl so the render
+    // backend can drive ra_hwdec_ctx (hwdec interop). Mirrors libmpv_gl.c's
+    // setup; the ra_ctx's swapchain is dummy (we render via pl_opengl_wrap,
+    // not the ra swapchain), so the ra_ctx_params{0} is intentional.
+    ctx->ra_ctx = talloc_zero(p, struct ra_ctx);
+    ctx->ra_ctx->log = ctx->log;
+    ctx->ra_ctx->global = ctx->global;
+    ctx->ra_ctx->opts = (struct ra_ctx_opts){ .allow_sw = true };
+    struct ra_ctx_params gl_params = {0};
+    p->gl->SwapInterval = NULL; // don't perturb host's swap-interval state
+    if (!ra_gl_ctx_init(ctx->ra_ctx, p->gl, gl_params))
+        return MPV_ERROR_UNSUPPORTED;
+
+    struct ra_ctx_opts *ctx_opts = mp_get_config_group(ctx, ctx->global, &ra_ctx_conf);
+    ctx->ra_ctx->opts.debug = ctx_opts->debug;
+    p->gl->debug_context = ctx_opts->debug;
+    ra_gl_set_debug(ctx->ra_ctx->ra, ctx_opts->debug);
+    talloc_free(ctx_opts);
+
+    ctx->ra = ctx->ra_ctx->ra;
 
     ctx->pllog = mppl_log_create(p, ctx->log);
     if (!ctx->pllog)
@@ -116,6 +141,8 @@ static void destroy(struct libmpv_pl_context *ctx)
         pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
     if (p->pl_gl)
         pl_opengl_destroy(&p->pl_gl);
+    if (ctx->ra_ctx)
+        ra_gl_ctx_uninit(ctx->ra_ctx);
     if (ctx->pllog)
         pl_log_destroy(&ctx->pllog);
 }
