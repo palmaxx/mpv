@@ -28,7 +28,9 @@
 #include "mpv/render.h"
 #include "options/m_config.h"
 #include "ta/ta_talloc.h"
+#include "video/hwdec.h"
 #include "video/mp_image.h"
+#include "video/out/gpu/hwdec.h"
 #include "video/out/gpu/video.h"
 #include "video/out/libmpv.h"
 
@@ -60,10 +62,21 @@ struct priv {
     // each frame's frame_priv.
     struct gpu_next_osd_state osd_state;
 
+    // Hwdec registry, driven by the core's hwdec_get hook. Mirrors the
+    // windowed VO; backed by the ra the per-API context-fns produced
+    // (ra_opengl for pl-opengl). load_all_by_default = true since this
+    // backend does not route VOCTRL_LOAD_HWDEC_API for per-format loads.
+    struct ra_hwdec_ctx hwdec_ctx;
+
     // Screen area, from resize().
     struct mp_rect src, dst;
     struct mp_osd_res osd_res;
 };
+
+static struct ra_hwdec *core_hwdec_get(void *ctx, int imgfmt)
+{
+    return ra_hwdec_get(ctx, imgfmt);
+}
 
 // Per-draw / per-screenshot option resolution, mirroring the windowed VO's
 // update_options. update_external() handles the vo_set_queue_params side
@@ -118,11 +131,29 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     if (!p->core)
         return MPV_ERROR_GENERIC;
 
+    // Stand up the hwdec registry so the core's map callback can resolve
+    // ra_hwdec per source-frame imgfmt. Same shape as vo_gpu_next preinit
+    // (vo_gpu_next.c) and the old libmpv_gpu init (load_all_by_default =
+    // true mirrors libmpv_gpu.c since VOCTRL_LOAD_HWDEC_API is not wired
+    // through vo_libmpv.c).
+    ctx->hwdec_devs = hwdec_devices_create();
+    p->hwdec_ctx = (struct ra_hwdec_ctx){
+        .log = ctx->log,
+        .global = ctx->global,
+        .ra_ctx = p->context->ra_ctx,
+    };
+    const struct gl_video_opts *gl_opts = p->opts_cache->opts;
+    ra_hwdec_ctx_init(&p->hwdec_ctx, ctx->hwdec_devs,
+                      gl_opts->hwdec_interop, true);
+
     gpu_next_core_set_frontend(p->core, &(struct gpu_next_core_frontend) {
         .opts = p->opts_cache->opts,
         .next_opts = p->next_opts,
-        // The libmpv render backend has no ra_ctx: software decoding only
-        // (no hwdec lookup) and no stats_ctx (no perf timer hooks).
+        .ra = p->context->ra,
+        .hwdec_get = core_hwdec_get,
+        .hwdec_ctx = &p->hwdec_ctx,
+        // No stats_ctx (the libmpv render backend has no per-frame perf
+        // collection); leaving timer_* NULL skips the timing wrap.
     });
 
     // Resolve the render options once so the renderer params are valid
@@ -396,6 +427,14 @@ static void destroy(struct render_backend *ctx)
     if (p->context && p->context->gpu) {
         for (int i = 0; i < MP_ARRAY_SIZE(p->osd_state.entries); i++)
             pl_tex_destroy(p->context->gpu, &p->osd_state.entries[i].tex);
+    }
+
+    // Hwdec teardown depends on ra (alive in p->context->ra_ctx until the
+    // context destroy below) and on hwdec_devs.
+    ra_hwdec_ctx_uninit(&p->hwdec_ctx);
+    if (ctx->hwdec_devs) {
+        hwdec_devices_destroy(ctx->hwdec_devs);
+        ctx->hwdec_devs = NULL;
     }
 
     if (p->context) {
