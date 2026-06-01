@@ -161,7 +161,9 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     gpu_next_core_update_render_options(p->core, p->opts_cache->opts,
                                         p->next_opts, false);
 
-    ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_FILM_GRAIN | VO_CAP_VFLIP;
+    // Mirror render_backend_gpu: driver_caps is not propagated to
+    // vo->driver->caps, so VO_CAP_FILM_GRAIN here would be a no-op.
+    ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_VFLIP;
     return 0;
 }
 
