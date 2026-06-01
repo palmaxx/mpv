@@ -249,9 +249,6 @@ void gpu_next_core_discard_frame(const struct pl_source_frame *src);
 // front-end populates pars->params before driving the render.
 pl_options gpu_next_core_options(struct gpu_next_core *core);
 
-// The libplacebo renderer owned by the core.
-pl_renderer gpu_next_core_renderer(struct gpu_next_core *core);
-
 // The libplacebo frame queue owned by the core. The core destroys it
 // first in gpu_next_core_destroy(); see the contract there.
 pl_queue gpu_next_core_queue(struct gpu_next_core *core);

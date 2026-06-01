@@ -489,11 +489,6 @@ pl_options gpu_next_core_options(struct gpu_next_core *core)
     return core->pars;
 }
 
-pl_renderer gpu_next_core_renderer(struct gpu_next_core *core)
-{
-    return core->rr;
-}
-
 pl_queue gpu_next_core_queue(struct gpu_next_core *core)
 {
     return core->queue;
