@@ -42,6 +42,11 @@ API changes
           mpv_color_primaries, mpv_color_transfer, mpv_hdr_metadata) for
           host-side target-surface colorspace and HDR metadata negotiation,
           orthogonal to the chosen graphics API.
+        - add MPV_RENDER_API_TYPE_PL_VULKAN and the associated render parameters
+          MPV_RENDER_PARAM_VULKAN_INIT_PARAMS and MPV_RENDER_PARAM_VULKAN_TEX,
+          plus the new header render_vulkan.h. Wraps a host-provided VkDevice
+          and VkImage as a libplacebo target surface, the cross-platform
+          (Linux/Wayland, Vulkan-on-Windows) sibling of MPV_RENDER_API_TYPE_PL_D3D11.
  2.6    - add MPV_RENDER_API_TYPE_PL_OPENGL, which exposes the libplacebo-based
           gpu-next renderer through the libmpv render API. See render.h and
           render_gl.h. Uses the same init/FBO params as MPV_RENDER_API_TYPE_OPENGL.

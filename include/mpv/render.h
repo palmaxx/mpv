@@ -458,6 +458,21 @@ typedef enum mpv_render_param_type {
      * See render_d3d11.h.
      */
     MPV_RENDER_PARAM_D3D11_TEX = 23,
+    /**
+     * Required parameters for initializing the libplacebo Vulkan backend.
+     * Valid for mpv_render_context_create().
+     * Type: mpv_vulkan_init_params*
+     *
+     * See render_vulkan.h.
+     */
+    MPV_RENDER_PARAM_VULKAN_INIT_PARAMS = 24,
+    /**
+     * Describes a Vulkan render target. Valid for mpv_render_context_render().
+     * Type: mpv_vulkan_tex*
+     *
+     * See render_vulkan.h.
+     */
+    MPV_RENDER_PARAM_VULKAN_TEX = 25,
 } mpv_render_param_type;
 
 /**
@@ -509,6 +524,10 @@ typedef struct mpv_render_param {
 // See render_d3d11.h. Renders through the libplacebo-based gpu-next pipeline
 // onto a host-provided ID3D11Texture2D, with HDR-capable target surfaces.
 #define MPV_RENDER_API_TYPE_PL_D3D11 "pl-d3d11"
+// See render_vulkan.h. Renders through the libplacebo-based gpu-next pipeline
+// onto a host-provided VkImage, with HDR-capable target surfaces. The
+// cross-platform sibling of pl-d3d11 (Linux/Wayland, and Vulkan-on-Windows).
+#define MPV_RENDER_API_TYPE_PL_VULKAN "pl-vulkan"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
 
