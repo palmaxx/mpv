@@ -20,38 +20,168 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "mpv/render_vulkan.h"
+#include "ta/ta_talloc.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/libmpv.h"
+#include "video/out/placebo/utils.h"
 
-// Plan-2 Phase-6 scaffolding stub, parallel to the P1.2 D3D11 stub. The bodies
-// (pl_vulkan_import / pl_vulkan_wrap + the per-frame acquire/release sync) and
-// the context_backends[] registration land together in the impl commit, so the
-// failure surface stays "init returns error and is destroyed cleanly" rather
-// than a half-initialised context.
+struct priv {
+    pl_vulkan pl_vulkan;
+    pl_tex wrapped_fbo;
+
+    // Stashed by acquire_target for the paired done_frame "hold": the layout
+    // the host wants the image back in, and the semaphore to fire once it is.
+    bool released;
+    VkImageLayout final_layout;
+    pl_vulkan_sem release_sem;
+};
 
 static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
 {
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    ctx->priv = talloc_zero(NULL, struct priv);
+    struct priv *p = ctx->priv;
+
+    mpv_vulkan_init_params *ip =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_INIT_PARAMS, NULL);
+    if (!ip || !ip->instance || !ip->phys_device || !ip->device)
+        return MPV_ERROR_INVALID_PARAMETER;
+
+    ctx->pllog = mppl_log_create(p, ctx->log);
+    if (!ctx->pllog)
+        return MPV_ERROR_GENERIC;
+
+    // Import the host's existing VkDevice (never create our own). libplacebo
+    // takes no ownership: pl_vulkan_destroy tears down only libplacebo state
+    // and leaves the host's VkInstance/VkDevice intact. The host is
+    // responsible for having created the device with libplacebo's required
+    // features + the extensions it lists here.
+    struct pl_vulkan_import_params ipar = *pl_vulkan_import_params(
+        .instance       = (VkInstance)ip->instance,
+        .get_proc_addr  = ip->get_proc_addr,
+        .phys_device    = (VkPhysicalDevice)ip->phys_device,
+        .device         = (VkDevice)ip->device,
+        .extensions     = ip->extensions,
+        .num_extensions = ip->num_extensions,
+        .features       = ip->features,
+        .queue_graphics = { ip->queue_graphics_index, ip->queue_graphics_count },
+        .queue_compute  = { ip->queue_compute_index,  ip->queue_compute_count },
+        .queue_transfer = { ip->queue_transfer_index, ip->queue_transfer_count },
+    );
+    p->pl_vulkan = pl_vulkan_import(ctx->pllog, &ipar);
+    if (!p->pl_vulkan) {
+        MP_FATAL(ctx, "libplacebo Vulkan device import failed (check that the "
+                      "host enabled pl_vulkan_required_features).\n");
+        return MPV_ERROR_UNSUPPORTED;
+    }
+    ctx->gpu = p->pl_vulkan->gpu;
+    return 0;
 }
 
 static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out)
 {
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    struct priv *p = ctx->priv;
+
+    mpv_vulkan_tex *vt =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_TEX, NULL);
+    if (!vt || !vt->image)
+        return MPV_ERROR_INVALID_PARAMETER;
+
+    // A wrapped image starts "held by the user"; the previous wrap is always
+    // handed back to us by done_frame before the next wrap_fbo, so destroying
+    // it here is the held-by-user case (pl_tex_destroy leaves the VkImage).
+    if (p->wrapped_fbo)
+        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+
+    p->wrapped_fbo = pl_vulkan_wrap(ctx->gpu, pl_vulkan_wrap_params(
+        .image  = (VkImage)vt->image,
+        .width  = vt->w,
+        .height = vt->h,
+        .format = vt->format,
+        .usage  = vt->usage,
+    ));
+    if (!p->wrapped_fbo) {
+        MP_ERR(ctx, "Failed to wrap host VkImage (%dx%d, format %d) as pl_tex.\n",
+               vt->w, vt->h, (int)vt->format);
+        return MPV_ERROR_UNSUPPORTED;
+    }
+    *out = p->wrapped_fbo;
+    return 0;
+}
+
+static void acquire_target(struct libmpv_pl_context *ctx,
+                           mpv_render_param *params, pl_tex target)
+{
+    struct priv *p = ctx->priv;
+
+    mpv_vulkan_tex *vt =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_TEX, NULL);
+    if (!vt)
+        return;
+
+    // "Release" hands control to libplacebo: it waits on acquire_sem (if any),
+    // treating the image as currently in current_layout. qf = IGNORED skips a
+    // queue-family transition (the wrapped image is concurrent across
+    // libplacebo's queues, and the host shares the same imported device).
+    pl_vulkan_release_ex(ctx->gpu, pl_vulkan_release_params(
+        .tex       = target,
+        .layout    = vt->current_layout,
+        .qf        = VK_QUEUE_FAMILY_IGNORED,
+        .semaphore = { (VkSemaphore)vt->acquire_sem, vt->acquire_value },
+    ));
+
+    p->released = true;
+    p->final_layout = vt->final_layout;
+    p->release_sem = (pl_vulkan_sem){ (VkSemaphore)vt->release_sem,
+                                      vt->release_value };
 }
 
 static void done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
+    struct priv *p = ctx->priv;
+    if (!p->released)
+        return;
+
+    // "Hold" hands control back to the host: libplacebo transitions the image
+    // to final_layout and fires release_sem when it is ready for presentation.
+    pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
+        .tex       = p->wrapped_fbo,
+        .layout    = p->final_layout,
+        .qf        = VK_QUEUE_FAMILY_IGNORED,
+        .semaphore = p->release_sem,
+    ));
+    p->released = false;
 }
 
 static void destroy(struct libmpv_pl_context *ctx)
 {
+    struct priv *p = ctx->priv;
+    if (!p)
+        return;
+    // If a render aborted between acquire and done_frame, hand the image back
+    // so libplacebo isn't left owning a wrap we're about to destroy.
+    if (p->released && p->wrapped_fbo) {
+        pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
+            .tex       = p->wrapped_fbo,
+            .layout    = p->final_layout,
+            .qf        = VK_QUEUE_FAMILY_IGNORED,
+            .semaphore = p->release_sem,
+        ));
+        p->released = false;
+    }
+    if (p->wrapped_fbo)
+        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+    if (p->pl_vulkan)
+        pl_vulkan_destroy(&p->pl_vulkan);
+    if (ctx->pllog)
+        pl_log_destroy(&ctx->pllog);
 }
 
 const struct libmpv_pl_context_fns libmpv_pl_context_vulkan = {
     .api_name = MPV_RENDER_API_TYPE_PL_VULKAN,
     .init = init,
     .wrap_fbo = wrap_fbo,
+    .acquire_target = acquire_target,
     .done_frame = done_frame,
     .destroy = destroy,
 };

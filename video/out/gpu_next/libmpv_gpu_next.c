@@ -41,6 +41,9 @@ extern const struct libmpv_pl_context_fns libmpv_pl_context_gl;
 #if HAVE_D3D11 && defined(PL_HAVE_D3D11)
 extern const struct libmpv_pl_context_fns libmpv_pl_context_d3d11;
 #endif
+#if HAVE_VULKAN && defined(PL_HAVE_VULKAN)
+extern const struct libmpv_pl_context_fns libmpv_pl_context_vulkan;
+#endif
 
 static const struct libmpv_pl_context_fns *context_backends[] = {
 #if HAVE_GL && defined(PL_HAVE_OPENGL)
@@ -48,6 +51,9 @@ static const struct libmpv_pl_context_fns *context_backends[] = {
 #endif
 #if HAVE_D3D11 && defined(PL_HAVE_D3D11)
     &libmpv_pl_context_d3d11,
+#endif
+#if HAVE_VULKAN && defined(PL_HAVE_VULKAN)
+    &libmpv_pl_context_vulkan,
 #endif
     NULL,
 };
@@ -415,6 +421,12 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     int err = p->context->fns->wrap_fbo(p->context, params, &fbo);
     if (err < 0)
         return err;
+
+    // Externally-synchronized surfaces (Vulkan): take ownership of the target
+    // from the host before the renderer (or the error-path clear) touches it.
+    // Paired with done_frame below. No-op for GL / D3D11 (hook is NULL).
+    if (p->context->fns->acquire_target)
+        p->context->fns->acquire_target(p->context, params, fbo);
 
     int depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0);
     bool flip = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y, int, 0);
