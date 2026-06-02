@@ -168,39 +168,46 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
         return MPV_ERROR_GENERIC;
 
     // Stand up the hwdec registry so the core's map callback can resolve
-    // ra_hwdec per source-frame imgfmt. Same shape as vo_gpu_next preinit
-    // (vo_gpu_next.c) and the old libmpv_gpu init (load_all_by_default =
-    // true mirrors libmpv_gpu.c since VOCTRL_LOAD_HWDEC_API is not wired
-    // through vo_libmpv.c).
-    ctx->hwdec_devs = hwdec_devices_create();
+    // ra_hwdec per source-frame imgfmt. The hwdec interops are ra-typed, so
+    // this needs an ra_ctx: only surface backends that build one (the GL
+    // backend, via libmpv_pl_context_gl) get hwdec. A backend exposing only a
+    // pl_gpu and no ra_ctx (the D3D11 surface backend in Plan-2 Phase 2) runs
+    // software-decode only -- the zero-initialised hwdec_ctx makes the core's
+    // hwdec_get find no interop. d3d11va interop on the render API is Phase 4.
+    // Otherwise same shape as vo_gpu_next preinit (load_all_by_default = true
+    // mirrors libmpv_gpu.c since VOCTRL_LOAD_HWDEC_API is not wired through
+    // vo_libmpv.c).
+    if (p->context->ra_ctx) {
+        ctx->hwdec_devs = hwdec_devices_create();
 
-    // Forward the host's native resources (X11 / Wayland / DRM displays) into
-    // the ra before initialising hwdec, exactly as render_backend_gpu does
-    // (libmpv_gpu.c): the GL hwdec interops resolve them by name. Without this
-    // the render API silently loses the Linux GL hwdec paths it already
-    // supports. ra_ctx is guaranteed here (only the GL surface backend exists).
-    for (int n = 0; params && params[n].type; n++) {
-        if (params[n].type > 0 &&
-            params[n].type < MP_ARRAY_SIZE(native_resource_map) &&
-            native_resource_map[params[n].type].name)
-        {
-            const struct native_resource_entry *entry =
-                &native_resource_map[params[n].type];
-            void *data = params[n].data;
-            if (entry->size)
-                data = talloc_memdup(p, data, entry->size);
-            ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
+        // Forward the host's native resources (X11 / Wayland / DRM displays)
+        // into the ra before initialising hwdec, exactly as render_backend_gpu
+        // does (libmpv_gpu.c): the GL hwdec interops resolve them by name.
+        // Without this the render API silently loses the Linux GL hwdec paths
+        // it already supports.
+        for (int n = 0; params && params[n].type; n++) {
+            if (params[n].type > 0 &&
+                params[n].type < MP_ARRAY_SIZE(native_resource_map) &&
+                native_resource_map[params[n].type].name)
+            {
+                const struct native_resource_entry *entry =
+                    &native_resource_map[params[n].type];
+                void *data = params[n].data;
+                if (entry->size)
+                    data = talloc_memdup(p, data, entry->size);
+                ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
+            }
         }
-    }
 
-    p->hwdec_ctx = (struct ra_hwdec_ctx){
-        .log = ctx->log,
-        .global = ctx->global,
-        .ra_ctx = p->context->ra_ctx,
-    };
-    const struct gl_video_opts *gl_opts = p->opts_cache->opts;
-    ra_hwdec_ctx_init(&p->hwdec_ctx, ctx->hwdec_devs,
-                      gl_opts->hwdec_interop, true);
+        p->hwdec_ctx = (struct ra_hwdec_ctx){
+            .log = ctx->log,
+            .global = ctx->global,
+            .ra_ctx = p->context->ra_ctx,
+        };
+        const struct gl_video_opts *gl_opts = p->opts_cache->opts;
+        ra_hwdec_ctx_init(&p->hwdec_ctx, ctx->hwdec_devs,
+                          gl_opts->hwdec_interop, true);
+    }
 
     gpu_next_core_set_frontend(p->core, &(struct gpu_next_core_frontend) {
         .opts = p->opts_cache->opts,
