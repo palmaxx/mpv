@@ -320,6 +320,90 @@ static int get_target_size(struct render_backend *ctx, mpv_render_param *params,
     return 0;
 }
 
+// Translate the host-supplied mpv_color_primaries (a frozen mpv-ABI enum) to
+// the libplacebo equivalent. An explicit switch -- not a cast -- keeps the
+// public mpv enum values independent of libplacebo's internal ordering, so a
+// libplacebo enum reshuffle cannot silently change what a host's value means.
+static enum pl_color_primaries map_primaries(mpv_color_primaries prim)
+{
+    switch (prim) {
+    case MPV_COLOR_PRIMARIES_BT_601_525: return PL_COLOR_PRIM_BT_601_525;
+    case MPV_COLOR_PRIMARIES_BT_601_625: return PL_COLOR_PRIM_BT_601_625;
+    case MPV_COLOR_PRIMARIES_BT_709:     return PL_COLOR_PRIM_BT_709;
+    case MPV_COLOR_PRIMARIES_BT_470M:    return PL_COLOR_PRIM_BT_470M;
+    case MPV_COLOR_PRIMARIES_EBU_3213:   return PL_COLOR_PRIM_EBU_3213;
+    case MPV_COLOR_PRIMARIES_BT_2020:    return PL_COLOR_PRIM_BT_2020;
+    case MPV_COLOR_PRIMARIES_APPLE:      return PL_COLOR_PRIM_APPLE;
+    case MPV_COLOR_PRIMARIES_ADOBE:      return PL_COLOR_PRIM_ADOBE;
+    case MPV_COLOR_PRIMARIES_PRO_PHOTO:  return PL_COLOR_PRIM_PRO_PHOTO;
+    case MPV_COLOR_PRIMARIES_CIE_1931:   return PL_COLOR_PRIM_CIE_1931;
+    case MPV_COLOR_PRIMARIES_DCI_P3:     return PL_COLOR_PRIM_DCI_P3;
+    case MPV_COLOR_PRIMARIES_DISPLAY_P3: return PL_COLOR_PRIM_DISPLAY_P3;
+    case MPV_COLOR_PRIMARIES_V_GAMUT:    return PL_COLOR_PRIM_V_GAMUT;
+    case MPV_COLOR_PRIMARIES_S_GAMUT:    return PL_COLOR_PRIM_S_GAMUT;
+    case MPV_COLOR_PRIMARIES_FILM_C:     return PL_COLOR_PRIM_FILM_C;
+    case MPV_COLOR_PRIMARIES_ACES_AP0:   return PL_COLOR_PRIM_ACES_AP0;
+    case MPV_COLOR_PRIMARIES_ACES_AP1:   return PL_COLOR_PRIM_ACES_AP1;
+    case MPV_COLOR_PRIMARIES_AUTO:       break;
+    }
+    return PL_COLOR_PRIM_UNKNOWN;
+}
+
+static enum pl_color_transfer map_transfer(mpv_color_transfer trc)
+{
+    switch (trc) {
+    case MPV_COLOR_TRANSFER_BT_1886:   return PL_COLOR_TRC_BT_1886;
+    case MPV_COLOR_TRANSFER_SRGB:      return PL_COLOR_TRC_SRGB;
+    case MPV_COLOR_TRANSFER_LINEAR:    return PL_COLOR_TRC_LINEAR;
+    case MPV_COLOR_TRANSFER_GAMMA18:   return PL_COLOR_TRC_GAMMA18;
+    case MPV_COLOR_TRANSFER_GAMMA20:   return PL_COLOR_TRC_GAMMA20;
+    case MPV_COLOR_TRANSFER_GAMMA22:   return PL_COLOR_TRC_GAMMA22;
+    case MPV_COLOR_TRANSFER_GAMMA24:   return PL_COLOR_TRC_GAMMA24;
+    case MPV_COLOR_TRANSFER_GAMMA26:   return PL_COLOR_TRC_GAMMA26;
+    case MPV_COLOR_TRANSFER_GAMMA28:   return PL_COLOR_TRC_GAMMA28;
+    case MPV_COLOR_TRANSFER_PRO_PHOTO: return PL_COLOR_TRC_PRO_PHOTO;
+    case MPV_COLOR_TRANSFER_ST428:     return PL_COLOR_TRC_ST428;
+    case MPV_COLOR_TRANSFER_PQ:        return PL_COLOR_TRC_PQ;
+    case MPV_COLOR_TRANSFER_HLG:       return PL_COLOR_TRC_HLG;
+    case MPV_COLOR_TRANSFER_V_LOG:     return PL_COLOR_TRC_V_LOG;
+    case MPV_COLOR_TRANSFER_S_LOG1:    return PL_COLOR_TRC_S_LOG1;
+    case MPV_COLOR_TRANSFER_S_LOG2:    return PL_COLOR_TRC_S_LOG2;
+    case MPV_COLOR_TRANSFER_AUTO:      break;
+    }
+    return PL_COLOR_TRC_UNKNOWN;
+}
+
+// Map the host's per-frame MPV_RENDER_PARAM_TARGET_COLORSPACE to a
+// pl_color_space. Zero-valued metadata stays zero ("unknown" to libplacebo);
+// the optional mastering-display primaries are forwarded only when the host
+// supplied a full set of chromaticities (otherwise libplacebo derives them
+// from the primaries enum).
+static struct pl_color_space map_target_colorspace(
+    const mpv_render_param_target_colorspace *cs)
+{
+    struct pl_color_space out = {
+        .primaries = map_primaries(cs->primaries),
+        .transfer  = map_transfer(cs->transfer),
+        .hdr = {
+            .min_luma = cs->hdr.min_luma,
+            .max_luma = cs->hdr.max_luma,
+            .max_cll  = cs->hdr.max_cll,
+            .max_fall = cs->hdr.max_fall,
+        },
+    };
+    if (cs->hdr.prim_red.x || cs->hdr.prim_green.x || cs->hdr.prim_blue.x ||
+        cs->hdr.white_point.x)
+    {
+        out.hdr.prim = (struct pl_raw_primaries){
+            .red   = { cs->hdr.prim_red.x,    cs->hdr.prim_red.y },
+            .green = { cs->hdr.prim_green.x,  cs->hdr.prim_green.y },
+            .blue  = { cs->hdr.prim_blue.x,   cs->hdr.prim_blue.y },
+            .white = { cs->hdr.white_point.x, cs->hdr.white_point.y },
+        };
+    }
+    return out;
+}
+
 static int render(struct render_backend *ctx, mpv_render_param *params,
                   struct vo_frame *frame)
 {
@@ -336,7 +420,13 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     bool flip = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y, int, 0);
     mpv_render_param_target_colorspace *target_cs =
         get_mpv_render_param(params, MPV_RENDER_PARAM_TARGET_COLORSPACE, NULL);
-    (void)target_cs;
+    // A host that pins a primaries or transfer is negotiating a real target
+    // colorspace; an absent param (or an all-AUTO struct, the documented
+    // "same as omitted" case) keeps the swapchain-free sRGB default = the
+    // PL_OPENGL behaviour.
+    bool target_known = target_cs &&
+        (target_cs->primaries != MPV_COLOR_PRIMARIES_AUTO ||
+         target_cs->transfer  != MPV_COLOR_TRANSFER_AUTO);
 
     update_options(p);
 
@@ -376,9 +466,13 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                                  can_interpolate ? frame->approx_duration : 0);
     }
 
-    // Build the render target from the host FBO. The libmpv render API has
-    // no swapchain, so the target colorspace defaults to sRGB and is
-    // refined only by the --target-* options.
+    // Build the render target from the host FBO. Without a host-supplied
+    // colorspace the render API has no swapchain to negotiate one, so it
+    // defaults to sRGB and is refined only by the --target-* options (the
+    // PL_OPENGL SDR path). When the host pins one via TARGET_COLORSPACE (the
+    // PL_D3D11 HDR path), that becomes the swapchain-equivalent baseline.
+    struct pl_color_space host_csp =
+        target_known ? map_target_colorspace(target_cs) : pl_color_space_srgb;
     struct pl_frame target = {
         .num_planes = 1,
         .planes[0] = {
@@ -387,14 +481,18 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
             .component_mapping = {0, 1, 2, 3},
         },
         .repr = pl_color_repr_rgb,
-        .color = pl_color_space_srgb,
+        .color = host_csp,
     };
 
-    // No swapchain to report a target colorspace.
-    struct pl_color_space target_csp = {0};
-    gpu_next_core_apply_target_options(p->core, &target, 0, false, depth);
+    // hint = target_known makes user --target-* opts override only the fields
+    // the host left unset (mirrors the windowed swapchain-hint precedence);
+    // target_csp + !target_unknown drive the Windows sRGB-as-PQ path in
+    // finalize. Absent host data reproduces the prior unconditional behaviour.
+    struct pl_color_space target_csp = target_known ? host_csp
+                                                    : (struct pl_color_space){0};
+    gpu_next_core_apply_target_options(p->core, &target, 0, target_known, depth);
     gpu_next_core_finalize_target_csp(p->core, &target, frame->current,
-                                      &target_csp, true);
+                                      &target_csp, !target_known);
 
     gpu_next_core_update_overlays(p->core, p->osd_res,
                                   (frame->current && opts->blend_subs) ? OSD_DRAW_OSD_ONLY : 0,
