@@ -1339,6 +1339,9 @@ if features['vulkan']
                      'video/out/vulkan/context.c',
                      'video/out/vulkan/utils.c',
                      'video/filter/vf_gpu_vulkan.c')
+    if libplacebo.get_variable('pl_has_vulkan', default_value: '0') == '1'
+        sources += files('video/out/vulkan/libmpv_pl_vulkan.c')
+    endif
 endif
 
 if features['vulkan'] and features['android']
@@ -1834,7 +1837,7 @@ if get_option('libmpv')
 
     headers = ['include/mpv/client.h', 'include/mpv/render.h',
                'include/mpv/render_gl.h', 'include/mpv/render_d3d11.h',
-               'include/mpv/stream_cb.h']
+               'include/mpv/render_vulkan.h', 'include/mpv/stream_cb.h']
     install_headers(headers, subdir: 'mpv')
 
     # Allow projects to build with libmpv by cloning into ./subprojects/mpv
