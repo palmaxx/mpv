@@ -71,7 +71,21 @@ struct libmpv_pl_context_fns {
     int (*wrap_fbo)(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out);
 
+    // Optional. For externally-synchronized surfaces (Vulkan), transfer the
+    // freshly-wrapped target from the host to libplacebo before the renderer
+    // touches it (the "acquire" half of the per-frame ownership handshake).
+    // Called once per render(), after wrap_fbo and before any render/clear,
+    // and is paired with done_frame (the "release" half). NULL for backends
+    // whose surfaces need no explicit acquire (GL, D3D11). params carries the
+    // per-frame surface descriptor (e.g. MPV_RENDER_PARAM_VULKAN_TEX) with the
+    // acquire semaphore + current layout.
+    void (*acquire_target)(struct libmpv_pl_context *ctx,
+                           mpv_render_param *params, pl_tex target);
+
     // Signal end-of-render (the analogue of libmpv_gpu_context_fns.done_frame).
+    // For externally-synchronized surfaces this is the "release" half paired
+    // with acquire_target: transfer the target back to the host in its
+    // requested final layout, signalling the release semaphore.
     void (*done_frame)(struct libmpv_pl_context *ctx, bool display_synced);
 
     // Free everything owned by the implementation, including ctx->gpu if the
