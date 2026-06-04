@@ -379,6 +379,26 @@ static enum pl_color_transfer map_transfer(mpv_color_transfer trc)
     return PL_COLOR_TRC_UNKNOWN;
 }
 
+// Whether the host actually supplied a target colorspace. render.h documents
+// an all-zero struct as equivalent to omitting the param, so any non-default
+// field -- primaries, transfer, or HDR metadata (luminance, CLL/FALL, or raw
+// mastering-display chromaticities) -- marks it as present and the renderer
+// honours it. HDR-metadata-only payloads (AUTO primaries/transfer) used to be
+// dropped; they now apply, with the renderer/user options filling the unset
+// primaries and transfer.
+static bool target_colorspace_present(
+    const mpv_render_param_target_colorspace *cs)
+{
+    return cs->primaries != MPV_COLOR_PRIMARIES_AUTO ||
+           cs->transfer  != MPV_COLOR_TRANSFER_AUTO ||
+           cs->hdr.max_luma || cs->hdr.min_luma ||
+           cs->hdr.max_cll  || cs->hdr.max_fall ||
+           cs->hdr.prim_red.x    || cs->hdr.prim_red.y ||
+           cs->hdr.prim_green.x  || cs->hdr.prim_green.y ||
+           cs->hdr.prim_blue.x   || cs->hdr.prim_blue.y ||
+           cs->hdr.white_point.x || cs->hdr.white_point.y;
+}
+
 // Map the host's per-frame MPV_RENDER_PARAM_TARGET_COLORSPACE to a
 // pl_color_space. Zero-valued metadata stays zero ("unknown" to libplacebo);
 // the optional mastering-display primaries are forwarded only when the host
@@ -424,21 +444,24 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     // Externally-synchronized surfaces (Vulkan): take ownership of the target
     // from the host before the renderer (or the error-path clear) touches it.
-    // Paired with done_frame below. No-op for GL / D3D11 (hook is NULL).
-    if (p->context->fns->acquire_target)
-        p->context->fns->acquire_target(p->context, params, fbo);
+    // Paired with done_frame below. No-op for GL / D3D11 (hook is NULL). A
+    // failure here means the host's sync descriptor was rejected before any
+    // ownership transfer, so abort without a paired done_frame.
+    if (p->context->fns->acquire_target) {
+        err = p->context->fns->acquire_target(p->context, params, fbo);
+        if (err < 0)
+            return err;
+    }
 
     int depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0);
     bool flip = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y, int, 0);
     mpv_render_param_target_colorspace *target_cs =
         get_mpv_render_param(params, MPV_RENDER_PARAM_TARGET_COLORSPACE, NULL);
-    // A host that pins a primaries or transfer is negotiating a real target
-    // colorspace; an absent param (or an all-AUTO struct, the documented
+    // A host supplying any non-default colorspace field is negotiating a real
+    // target colorspace; an absent param (or an all-zero struct, the documented
     // "same as omitted" case) keeps the swapchain-free sRGB default = the
     // PL_OPENGL behaviour.
-    bool target_known = target_cs &&
-        (target_cs->primaries != MPV_COLOR_PRIMARIES_AUTO ||
-         target_cs->transfer  != MPV_COLOR_TRANSFER_AUTO);
+    bool target_known = target_cs && target_colorspace_present(target_cs);
 
     update_options(p);
 
@@ -557,10 +580,14 @@ done:
         pl_tex_clear(gpu, fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
 
     // The host owns surface presentation; just flush libplacebo's commands
-    // so they are visible once the host uses the FBO.
+    // so they are visible once the host uses the FBO. done_frame completes the
+    // present handshake (for Vulkan, the release half); a failure there is
+    // reported to the host even when the frame itself rendered fine. A failed
+    // render (above) still shows purple and returns success, as before.
     pl_gpu_flush(gpu);
-    p->context->fns->done_frame(p->context, frame->display_synced);
-    return 0;
+    int present_err = p->context->fns->done_frame(p->context,
+                                                  frame->display_synced);
+    return present_err < 0 ? present_err : 0;
 }
 
 static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,

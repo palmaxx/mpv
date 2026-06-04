@@ -84,8 +84,19 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
 
     mpv_vulkan_tex *vt =
         get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_TEX, NULL);
-    if (!vt || !vt->image)
+    // Validate the import tuple up front so a bad descriptor fails
+    // deterministically here rather than as an opaque pl_vulkan_wrap failure
+    // (or worse, undefined behaviour) later. The sync semaphores are checked
+    // separately in acquire_target (they are not needed by get_target_size).
+    if (!vt || !vt->image || vt->w <= 0 || vt->h <= 0 ||
+        vt->format == VK_FORMAT_UNDEFINED || !vt->usage)
+    {
+        MP_ERR(ctx, "Invalid MPV_RENDER_PARAM_VULKAN_TEX: image=%p w=%d h=%d "
+                    "format=%d usage=0x%x.\n",
+               vt ? (void *)vt->image : NULL, vt ? vt->w : 0, vt ? vt->h : 0,
+               vt ? (int)vt->format : 0, vt ? (unsigned)vt->usage : 0);
         return MPV_ERROR_INVALID_PARAMETER;
+    }
 
     // A wrapped image starts "held by the user"; the previous wrap is always
     // handed back to us by done_frame before the next wrap_fbo, so destroying
@@ -109,15 +120,21 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
     return 0;
 }
 
-static void acquire_target(struct libmpv_pl_context *ctx,
-                           mpv_render_param *params, pl_tex target)
+static int acquire_target(struct libmpv_pl_context *ctx,
+                          mpv_render_param *params, pl_tex target)
 {
     struct priv *p = ctx->priv;
 
     mpv_vulkan_tex *vt =
         get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_TEX, NULL);
-    if (!vt)
-        return;
+    // release_sem is required: it is the only way the host learns mpv is done
+    // with the image. Reject a missing one before handing the image to
+    // libplacebo, so we never enter the released state without a way out of it.
+    if (!vt || !vt->release_sem) {
+        MP_ERR(ctx, "MPV_RENDER_PARAM_VULKAN_TEX is missing the required "
+                    "release_sem.\n");
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
 
     // "Release" hands control to libplacebo: it waits on acquire_sem (if any),
     // treating the image as currently in current_layout. qf = IGNORED skips a
@@ -134,23 +151,33 @@ static void acquire_target(struct libmpv_pl_context *ctx,
     p->final_layout = vt->final_layout;
     p->release_sem = (pl_vulkan_sem){ (VkSemaphore)vt->release_sem,
                                       vt->release_value };
+    return 0;
 }
 
-static void done_frame(struct libmpv_pl_context *ctx, bool display_synced)
+static int done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
     struct priv *p = ctx->priv;
     if (!p->released)
-        return;
+        return 0;
 
     // "Hold" hands control back to the host: libplacebo transitions the image
     // to final_layout and fires release_sem when it is ready for presentation.
-    pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
-        .tex       = p->wrapped_fbo,
-        .layout    = p->final_layout,
-        .qf        = VK_QUEUE_FAMILY_IGNORED,
-        .semaphore = p->release_sem,
-    ));
+    // On failure libplacebo did NOT regain/return ownership, so keep released
+    // set: the host gets an error from mpv_render_context_render() and the
+    // teardown path (or a host-driven recovery) re-holds before destroying.
+    if (!pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
+            .tex       = p->wrapped_fbo,
+            .layout    = p->final_layout,
+            .qf        = VK_QUEUE_FAMILY_IGNORED,
+            .semaphore = p->release_sem,
+        )))
+    {
+        MP_ERR(ctx, "pl_vulkan_hold_ex failed to hand the target back to the "
+                    "host; release_sem was not signalled.\n");
+        return MPV_ERROR_GENERIC;
+    }
     p->released = false;
+    return 0;
 }
 
 static void destroy(struct libmpv_pl_context *ctx)
@@ -158,15 +185,20 @@ static void destroy(struct libmpv_pl_context *ctx)
     struct priv *p = ctx->priv;
     if (!p)
         return;
-    // If a render aborted between acquire and done_frame, hand the image back
-    // so libplacebo isn't left owning a wrap we're about to destroy.
+    // If a render aborted between acquire and done_frame (or done_frame's hold
+    // failed), hand the image back so libplacebo isn't left owning a wrap we're
+    // about to destroy. Best-effort at teardown: log a failure but proceed.
     if (p->released && p->wrapped_fbo) {
-        pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
-            .tex       = p->wrapped_fbo,
-            .layout    = p->final_layout,
-            .qf        = VK_QUEUE_FAMILY_IGNORED,
-            .semaphore = p->release_sem,
-        ));
+        if (!pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
+                .tex       = p->wrapped_fbo,
+                .layout    = p->final_layout,
+                .qf        = VK_QUEUE_FAMILY_IGNORED,
+                .semaphore = p->release_sem,
+            )))
+        {
+            MP_WARN(ctx, "pl_vulkan_hold_ex failed during teardown; destroying "
+                         "a still-held wrap.\n");
+        }
         p->released = false;
     }
     if (p->wrapped_fbo)
