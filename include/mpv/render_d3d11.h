@@ -44,11 +44,14 @@ extern "C" {
  *
  *   - HDR10 / scRGB target surfaces (R10G10B10A2_UNORM /
  *     R16G16B16A16_FLOAT swapchains with explicit colorspace negotiation),
- *   - direct zero-copy with d3d11va-decoded source frames (when the host
- *     device matches the decoder device),
  *   - reduced GPU-driver overhead vs the GL-on-D3D translation layers (ANGLE),
  *   - and the same libplacebo render pipeline as the windowed --vo=gpu-next
  *     path.
+ *
+ * Source-frame decode: decoded frames are currently uploaded to the render
+ * device (software interop), like the other render-API backends. Zero-copy
+ * import of d3d11va-decoded surfaces on the render API is not yet implemented
+ * for this backend; only the windowed --vo=gpu-next path does d3d11va interop.
  *
  * On non-Windows platforms, this header is still installed but the
  * MPV_RENDER_API_TYPE_PL_D3D11 backend is absent — mpv_render_context_create()
@@ -155,8 +158,11 @@ typedef struct mpv_d3d11_tex {
      */
     void *tex;
     /**
-     * Valid dimensions of the texture, in pixels. Must match the texture's
-     * own width / height. Must be set.
+     * Texture dimensions in pixels. libplacebo introspects the actual size
+     * from the ID3D11Texture2D, so these are an optional host contract check:
+     * if non-zero, they are validated against the wrapped texture and a
+     * mismatch fails the render call with MPV_ERROR_INVALID_PARAMETER. Leave
+     * them 0 to skip the check and use the introspected dimensions as-is.
      */
     int w, h;
 } mpv_d3d11_tex;
