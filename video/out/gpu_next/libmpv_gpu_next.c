@@ -26,6 +26,7 @@
 #include "libmpv_gpu_next.h"
 #include "misc/bstr.h"
 #include "mpv/render.h"
+#include "mpv/render_gl.h"
 #include "options/m_config.h"
 #include "ta/ta_talloc.h"
 #include "video/hwdec.h"
@@ -43,6 +44,35 @@ static const struct libmpv_pl_context_fns *context_backends[] = {
     &libmpv_pl_context_gl,
 #endif
     NULL,
+};
+
+// Host-supplied native resources forwarded into the ra for hwdec interop,
+// indexed by mpv_render_param_type. Identical mapping to render_backend_gpu
+// (libmpv_gpu.c): the GL hwdec backends look these up by name via
+// ra_get_native_resource(). size != 0 means the payload is copied (it must
+// outlive the params array); size 0 stores the pointer as-is.
+struct native_resource_entry {
+    const char *name;   // ra_add_native_resource() internal name argument
+    size_t size;        // size of struct pointed to (0 for no copy)
+};
+
+static const struct native_resource_entry native_resource_map[] = {
+    [MPV_RENDER_PARAM_X11_DISPLAY] = {
+        .name = "x11",
+        .size = 0,
+    },
+    [MPV_RENDER_PARAM_WL_DISPLAY] = {
+        .name = "wl",
+        .size = 0,
+    },
+    [MPV_RENDER_PARAM_DRM_DRAW_SURFACE_SIZE] = {
+        .name = "drm_draw_surface_size",
+        .size = sizeof(mpv_opengl_drm_draw_surface_size),
+    },
+    [MPV_RENDER_PARAM_DRM_DISPLAY_V2] = {
+        .name = "drm_params_v2",
+        .size = sizeof(mpv_opengl_drm_params_v2),
+    },
 };
 
 struct priv {
@@ -137,6 +167,26 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     // true mirrors libmpv_gpu.c since VOCTRL_LOAD_HWDEC_API is not wired
     // through vo_libmpv.c).
     ctx->hwdec_devs = hwdec_devices_create();
+
+    // Forward the host's native resources (X11 / Wayland / DRM displays) into
+    // the ra before initialising hwdec, exactly as render_backend_gpu does
+    // (libmpv_gpu.c): the GL hwdec interops resolve them by name. Without this
+    // the render API silently loses the Linux GL hwdec paths it already
+    // supports. ra_ctx is guaranteed here (only the GL surface backend exists).
+    for (int n = 0; params && params[n].type; n++) {
+        if (params[n].type > 0 &&
+            params[n].type < MP_ARRAY_SIZE(native_resource_map) &&
+            native_resource_map[params[n].type].name)
+        {
+            const struct native_resource_entry *entry =
+                &native_resource_map[params[n].type];
+            void *data = params[n].data;
+            if (entry->size)
+                data = talloc_memdup(p, data, entry->size);
+            ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
+        }
+    }
+
     p->hwdec_ctx = (struct ra_hwdec_ctx){
         .log = ctx->log,
         .global = ctx->global,
