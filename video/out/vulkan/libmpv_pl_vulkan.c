@@ -77,6 +77,27 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
     return 0;
 }
 
+// Ensure the wrapped target is held by the user (released == false) -- the
+// precondition for pl_tex_destroy, since destroying a still-released wrap
+// leaves the underlying VkImage in an undefined state (libplacebo contract).
+// If a prior pl_vulkan_hold_ex failed the wrap is still released, so retry the
+// hand-back here. Returns false (leaving p->released set) if the image could
+// not be reclaimed, in which case the caller must NOT destroy the wrap.
+static bool ensure_held(struct priv *p, pl_gpu gpu)
+{
+    if (!p->released)
+        return true;
+    if (!pl_vulkan_hold_ex(gpu, pl_vulkan_hold_params(
+            .tex       = p->wrapped_fbo,
+            .layout    = p->final_layout,
+            .qf        = VK_QUEUE_FAMILY_IGNORED,
+            .semaphore = p->release_sem,
+        )))
+        return false;
+    p->released = false;
+    return true;
+}
+
 static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out)
 {
@@ -98,11 +119,21 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
-    // A wrapped image starts "held by the user"; the previous wrap is always
-    // handed back to us by done_frame before the next wrap_fbo, so destroying
-    // it here is the held-by-user case (pl_tex_destroy leaves the VkImage).
-    if (p->wrapped_fbo)
+    // A wrapped image starts "held by the user"; done_frame normally hands the
+    // previous wrap back before the next wrap_fbo. If that hold failed the wrap
+    // is still released to libplacebo, so reclaim it before destroying -- never
+    // destroy a released wrap. If it cannot be reclaimed, refuse to render
+    // rather than corrupt the host image; the wrap is retried next call / at
+    // teardown (self-healing if the failure was transient).
+    if (p->wrapped_fbo) {
+        if (!ensure_held(p, ctx->gpu)) {
+            MP_ERR(ctx, "Cannot reclaim the previously released Vulkan target "
+                        "(pl_vulkan_hold_ex still failing); refusing to render "
+                        "until it can be handed back.\n");
+            return MPV_ERROR_GENERIC;
+        }
         pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+    }
 
     p->wrapped_fbo = pl_vulkan_wrap(ctx->gpu, pl_vulkan_wrap_params(
         .image  = (VkImage)vt->image,
@@ -157,26 +188,17 @@ static int acquire_target(struct libmpv_pl_context *ctx,
 static int done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
     struct priv *p = ctx->priv;
-    if (!p->released)
-        return 0;
 
     // "Hold" hands control back to the host: libplacebo transitions the image
     // to final_layout and fires release_sem when it is ready for presentation.
-    // On failure libplacebo did NOT regain/return ownership, so keep released
-    // set: the host gets an error from mpv_render_context_render() and the
-    // teardown path (or a host-driven recovery) re-holds before destroying.
-    if (!pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
-            .tex       = p->wrapped_fbo,
-            .layout    = p->final_layout,
-            .qf        = VK_QUEUE_FAMILY_IGNORED,
-            .semaphore = p->release_sem,
-        )))
-    {
+    // On failure libplacebo did NOT regain/return ownership, so released stays
+    // set: the host gets an error from mpv_render_context_render() and the next
+    // wrap_fbo / teardown reclaims the image before destroying it.
+    if (!ensure_held(p, ctx->gpu)) {
         MP_ERR(ctx, "pl_vulkan_hold_ex failed to hand the target back to the "
                     "host; release_sem was not signalled.\n");
         return MPV_ERROR_GENERIC;
     }
-    p->released = false;
     return 0;
 }
 
@@ -185,24 +207,21 @@ static void destroy(struct libmpv_pl_context *ctx)
     struct priv *p = ctx->priv;
     if (!p)
         return;
-    // If a render aborted between acquire and done_frame (or done_frame's hold
-    // failed), hand the image back so libplacebo isn't left owning a wrap we're
-    // about to destroy. Best-effort at teardown: log a failure but proceed.
-    if (p->released && p->wrapped_fbo) {
-        if (!pl_vulkan_hold_ex(ctx->gpu, pl_vulkan_hold_params(
-                .tex       = p->wrapped_fbo,
-                .layout    = p->final_layout,
-                .qf        = VK_QUEUE_FAMILY_IGNORED,
-                .semaphore = p->release_sem,
-            )))
-        {
-            MP_WARN(ctx, "pl_vulkan_hold_ex failed during teardown; destroying "
-                         "a still-held wrap.\n");
+    // The wrap must be held by the user before pl_tex_destroy. If a render
+    // aborted between acquire and done_frame (or done_frame's hold failed) it
+    // is still released, so reclaim it first. If even that final hand-back
+    // fails there is no further recovery, so leak the wrapper (the underlying
+    // VkImage is the host's) rather than destroy a released wrap and leave the
+    // host image undefined.
+    if (p->wrapped_fbo) {
+        if (ensure_held(p, ctx->gpu)) {
+            pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+        } else {
+            MP_WARN(ctx, "pl_vulkan_hold_ex failed at teardown; leaking the "
+                         "pl_tex wrapper to avoid corrupting the host image.\n");
+            p->wrapped_fbo = NULL; // drop our ref without destroying
         }
-        p->released = false;
     }
-    if (p->wrapped_fbo)
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
     if (p->pl_vulkan)
         pl_vulkan_destroy(&p->pl_vulkan);
     if (ctx->pllog)
