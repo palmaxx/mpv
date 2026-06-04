@@ -90,9 +90,9 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
         pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
 
     // libplacebo introspects the ID3D11Texture2D for format / dimensions /
-    // bind flags; the host-supplied w/h are documentation-only and not
-    // forwarded (the wrap_params w/h field is only honoured for video
-    // resources like NV12/P010, which are not valid render targets).
+    // bind flags; the wrap_params w/h field is only honoured for video
+    // resources like NV12/P010, which are not valid render targets, so it is
+    // left unset and the host-supplied w/h are validated post-wrap below.
     p->wrapped_fbo = pl_d3d11_wrap(ctx->gpu, pl_d3d11_wrap_params(
         .tex = (ID3D11Resource *)fbo->tex,
     ));
@@ -101,16 +101,31 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                fbo->w, fbo->h);
         return MPV_ERROR_UNSUPPORTED;
     }
+
+    // Host contract check: if the host declared dimensions, they must match
+    // what libplacebo introspected. A mismatch means the host is rendering to
+    // a different surface than it thinks, so reject rather than render wrong.
+    if ((fbo->w && p->wrapped_fbo->params.w != fbo->w) ||
+        (fbo->h && p->wrapped_fbo->params.h != fbo->h))
+    {
+        MP_ERR(ctx, "Host D3D11 texture dimensions (%dx%d) do not match the "
+                    "wrapped texture (%dx%d).\n", fbo->w, fbo->h,
+               p->wrapped_fbo->params.w, p->wrapped_fbo->params.h);
+        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
     *out = p->wrapped_fbo;
     return 0;
 }
 
-static void done_frame(struct libmpv_pl_context *ctx, bool display_synced)
+static int done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
     // The libmpv render API has no swapchain: the host owns surface
     // presentation, so there is nothing to submit here. D3D11 command
     // submission happens through libplacebo's immediate-context recording
     // and is flushed by render_backend_gpu_next via pl_gpu_flush().
+    return 0;
 }
 
 static void destroy(struct libmpv_pl_context *ctx)

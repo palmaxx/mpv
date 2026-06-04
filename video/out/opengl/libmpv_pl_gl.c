@@ -125,11 +125,12 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
     return 0;
 }
 
-static void done_frame(struct libmpv_pl_context *ctx, bool display_synced)
+static int done_frame(struct libmpv_pl_context *ctx, bool display_synced)
 {
     // The libmpv render API has no swapchain: the host owns surface
     // presentation, so there is nothing to submit here. GL command flush
     // happens implicitly when the host swaps its own surface.
+    return 0;
 }
 
 static void destroy(struct libmpv_pl_context *ctx)
