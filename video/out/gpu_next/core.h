@@ -402,11 +402,9 @@ void gpu_next_core_flush_cache(struct gpu_next_core *core);
 // the currently-configured options (read from the core's pl_options:
 // 2 + frame_mixer kernel radius scaled by skip_anti_aliasing). The
 // result is uncapped -- the front-end clamps against its own pl_queue
-// size or vo_set_queue_params's VO_MAX_REQ_FRAMES. Centralising the
-// formula here keeps the queue-params request in sync with whatever
-// frame mixer the core's options were configured with, which was the
-// historical §3.5 leak point when the formula lived in the VO away
-// from the option-resolution code that drives frame_mixer.
+// size or vo_set_queue_params's VO_MAX_REQ_FRAMES. Keeping the formula
+// here keeps the queue-params request in sync with the frame mixer the
+// core's options were configured with.
 int gpu_next_core_required_frames(struct gpu_next_core *core);
 
 // Look up the DR buffer backing a decoder-provided host pointer, or NULL
