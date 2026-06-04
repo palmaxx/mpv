@@ -32,6 +32,9 @@ API changes
 
 ::
 
+ 2.6    - add MPV_RENDER_API_TYPE_PL_OPENGL, which exposes the libplacebo-based
+          gpu-next renderer through the libmpv render API. See render.h and
+          render_gl.h. Uses the same init/FBO params as MPV_RENDER_API_TYPE_OPENGL.
  --- mpv 0.40.0 ---
  2.5    - Deprecate MPV_RENDER_PARAM_AMBIENT_LIGHT. no replacement.
  --- mpv 0.39.0 ---
