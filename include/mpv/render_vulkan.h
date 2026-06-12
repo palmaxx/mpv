@@ -78,6 +78,15 @@ extern "C" {
  * semaphores (leave the value 0). This mirrors libplacebo's
  * pl_vulkan_release_ex / pl_vulkan_hold_ex contract directly.
  *
+ * mpv wraps the image at the start of each render call and destroys its wrap
+ * before the call returns; no mpv-held wrap of a host VkImage survives
+ * between calls. Exception: when mpv_render_context_render() returns an error
+ * because the final hand-back failed (release_sem could not be signalled),
+ * mpv retains the wrap and reclaims it on a subsequent render call or at
+ * context destruction — the host must not destroy or recycle the VkImage
+ * until release_sem has been signalled anyway, so this imposes no extra
+ * host obligation.
+ *
  * Colorspace and HDR
  * ------------------
  *

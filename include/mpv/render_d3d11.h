@@ -85,9 +85,14 @@ extern "C" {
  *     to create the host's DXGI swapchain with
  *     DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_UNORDERED_ACCESS.
  *
- * libplacebo takes a reference to the texture on wrap and releases it on
- * teardown — the host is not responsible for keeping it alive while the
- * wrapper exists, but must not modify its state during a render call.
+ * Reference lifetime: the renderer takes one COM reference on the texture for
+ * the duration of the render call and releases it before
+ * mpv_render_context_render() returns — no mpv-held reference on the texture
+ * survives between calls. Wrapping a DXGI swapchain backbuffer directly is
+ * therefore supported: IDXGISwapChain::ResizeBuffers succeeds between render
+ * calls provided the host has released its own GetBuffer() reference and
+ * follows the standard DXGI resize rules for its other state. The host must
+ * not modify the texture's state during a render call.
  *
  * Device feature level
  * --------------------
@@ -125,6 +130,34 @@ extern "C" {
  *
  * For an SDR swapchain, omit the parameter entirely (renderer applies
  * sRGB defaults).
+ *
+ * The hdr metadata should describe the *display* the swapchain presents to,
+ * not the content: query IDXGIOutput6::GetDesc1() for MaxLuminance /
+ * MinLuminance and pass those, so the tone-mapper compresses to what the
+ * screen can actually show (hardcoding e.g. 1000 nits over-brightens on a
+ * dimmer panel). Caution on hybrid-GPU systems:
+ * IDXGISwapChain::GetContainingOutput fails when the device lives on a
+ * different adapter than the one owning the panel; the robust pattern is
+ * MonitorFromWindow(), then searching every adapter's outputs for the
+ * matching DXGI_OUTPUT_DESC.Monitor. Re-query when the window moves between
+ * monitors.
+ *
+ * Adapter choice and border clearing
+ * ----------------------------------
+ *
+ * On hybrid-GPU systems, D3D11CreateDevice(NULL, ...) selects adapter 0 —
+ * typically the integrated GPU, which may be too slow for gpu-next's
+ * tone-mapping at high resolutions. Create the device on the
+ * high-performance adapter (IDXGIFactory6::EnumAdapterByGpuPreference with
+ * DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE); the OS handles presenting across
+ * adapters when the panel is owned by the other GPU.
+ *
+ * When the video does not cover the full target (letterboxing), mpv clears
+ * the borders via libplacebo's pl_tex_clear, which requires a blittable
+ * target; R10G10B10A2_UNORM is not blittable on some drivers (e.g. NVIDIA),
+ * producing a per-frame clear failure. Such hosts should set
+ * --border-background=none and clear the target themselves before each
+ * render call.
  */
 
 /**
@@ -152,9 +185,9 @@ typedef struct mpv_d3d11_tex {
      * "Host-supplied texture state" requirements documented at the top of
      * this header.
      *
-     * The host owns the texture's lifetime; libplacebo internally takes a
-     * reference per wrap and releases it on the next wrap or on backend
-     * teardown.
+     * The host owns the texture's lifetime; the renderer takes a reference
+     * only for the duration of the render call and releases it before the
+     * call returns (see "Host-supplied texture state" above).
      */
     void *tex;
     /**
