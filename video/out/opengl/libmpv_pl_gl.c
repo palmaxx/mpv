@@ -30,7 +30,6 @@
 struct priv {
     GL *gl;
     pl_opengl pl_gl;
-    pl_tex wrapped_fbo;
 };
 
 static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
@@ -96,32 +95,27 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
 static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out)
 {
-    struct priv *p = ctx->priv;
-
     mpv_opengl_fbo *fbo =
         get_mpv_render_param(params, MPV_RENDER_PARAM_OPENGL_FBO, NULL);
     if (!fbo)
         return MPV_ERROR_INVALID_PARAMETER;
 
-    // Free the previous wrap before producing a new one; pl_tex_destroy()
-    // is the documented teardown for pl_opengl_wrap() (see libplacebo
-    // opengl.h: "This wrapper can be destroyed by simply calling
-    // pl_tex_destroy on it").
-    if (p->wrapped_fbo)
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
-
-    p->wrapped_fbo = pl_opengl_wrap(ctx->gpu, pl_opengl_wrap_params(
+    // The caller owns the wrap and destroys it by end-of-render;
+    // pl_tex_destroy() is the documented teardown for pl_opengl_wrap() (see
+    // libplacebo opengl.h: "This wrapper can be destroyed by simply calling
+    // pl_tex_destroy on it" -- the host's FBO itself is never touched).
+    pl_tex wrap = pl_opengl_wrap(ctx->gpu, pl_opengl_wrap_params(
         .framebuffer = fbo->fbo,
         .width = fbo->w,
         .height = fbo->h,
         .iformat = fbo->internal_format,
     ));
-    if (!p->wrapped_fbo) {
+    if (!wrap) {
         MP_ERR(ctx, "Failed to wrap host FBO %d (%dx%d) as pl_tex.\n",
                fbo->fbo, fbo->w, fbo->h);
         return MPV_ERROR_UNSUPPORTED;
     }
-    *out = p->wrapped_fbo;
+    *out = wrap;
     return 0;
 }
 
@@ -138,8 +132,6 @@ static void destroy(struct libmpv_pl_context *ctx)
     struct priv *p = ctx->priv;
     if (!p)
         return;
-    if (p->wrapped_fbo)
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
     if (p->pl_gl)
         pl_opengl_destroy(&p->pl_gl);
     if (ctx->ra_ctx)
