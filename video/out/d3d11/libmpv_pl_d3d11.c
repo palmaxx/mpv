@@ -27,7 +27,6 @@
 
 struct priv {
     pl_d3d11 pl_d3d11;
-    pl_tex wrapped_fbo;
 };
 
 static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
@@ -76,27 +75,26 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
 static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out)
 {
-    struct priv *p = ctx->priv;
-
     mpv_d3d11_tex *fbo =
         get_mpv_render_param(params, MPV_RENDER_PARAM_D3D11_TEX, NULL);
     if (!fbo || !fbo->tex)
         return MPV_ERROR_INVALID_PARAMETER;
 
-    // Free the previous wrap before producing a new one; pl_tex_destroy()
-    // is the documented teardown for pl_d3d11_wrap() (the wrapper holds one
-    // COM reference per wrap, released on pl_tex_destroy).
-    if (p->wrapped_fbo)
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
-
+    // The wrap holds one COM reference on the host texture (released by
+    // pl_tex_destroy, the documented teardown for pl_d3d11_wrap). The caller
+    // owns the wrap and destroys it by end-of-render, so the reference never
+    // survives past mpv_render_context_render() -- required for hosts that
+    // wrap a DXGI backbuffer directly, since ResizeBuffers demands zero
+    // outstanding references (the render_d3d11.h lifetime contract).
+    //
     // libplacebo introspects the ID3D11Texture2D for format / dimensions /
     // bind flags; the wrap_params w/h field is only honoured for video
     // resources like NV12/P010, which are not valid render targets, so it is
     // left unset and the host-supplied w/h are validated post-wrap below.
-    p->wrapped_fbo = pl_d3d11_wrap(ctx->gpu, pl_d3d11_wrap_params(
+    pl_tex wrap = pl_d3d11_wrap(ctx->gpu, pl_d3d11_wrap_params(
         .tex = (ID3D11Resource *)fbo->tex,
     ));
-    if (!p->wrapped_fbo) {
+    if (!wrap) {
         MP_ERR(ctx, "Failed to wrap host D3D11 texture (%dx%d) as pl_tex.\n",
                fbo->w, fbo->h);
         return MPV_ERROR_UNSUPPORTED;
@@ -105,17 +103,17 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
     // Host contract check: if the host declared dimensions, they must match
     // what libplacebo introspected. A mismatch means the host is rendering to
     // a different surface than it thinks, so reject rather than render wrong.
-    if ((fbo->w && p->wrapped_fbo->params.w != fbo->w) ||
-        (fbo->h && p->wrapped_fbo->params.h != fbo->h))
+    if ((fbo->w && wrap->params.w != fbo->w) ||
+        (fbo->h && wrap->params.h != fbo->h))
     {
         MP_ERR(ctx, "Host D3D11 texture dimensions (%dx%d) do not match the "
                     "wrapped texture (%dx%d).\n", fbo->w, fbo->h,
-               p->wrapped_fbo->params.w, p->wrapped_fbo->params.h);
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
+               wrap->params.w, wrap->params.h);
+        pl_tex_destroy(ctx->gpu, &wrap);
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
-    *out = p->wrapped_fbo;
+    *out = wrap;
     return 0;
 }
 
@@ -133,8 +131,6 @@ static void destroy(struct libmpv_pl_context *ctx)
     struct priv *p = ctx->priv;
     if (!p)
         return;
-    if (p->wrapped_fbo)
-        pl_tex_destroy(ctx->gpu, &p->wrapped_fbo);
     if (p->pl_d3d11)
         pl_d3d11_destroy(&p->pl_d3d11);
     if (ctx->pllog)

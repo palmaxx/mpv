@@ -323,6 +323,11 @@ static int get_target_size(struct render_backend *ctx, mpv_render_param *params,
         return err;
     *out_w = fbo->params.w;
     *out_h = fbo->params.h;
+    // The wrap was for sizing only; destroy it before returning so no
+    // reference on the host's surface outlives this call (the wrap was never
+    // released to libplacebo, so destroying it here is valid for all
+    // backends, including externally-synchronized ones).
+    pl_tex_destroy(p->context->gpu, &fbo);
     return 0;
 }
 
@@ -446,11 +451,14 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     // from the host before the renderer (or the error-path clear) touches it.
     // Paired with done_frame below. No-op for GL / D3D11 (hook is NULL). A
     // failure here means the host's sync descriptor was rejected before any
-    // ownership transfer, so abort without a paired done_frame.
+    // ownership transfer, so abort without a paired done_frame -- the wrap is
+    // still user-held and must be destroyed (caller-owned wrap contract).
     if (p->context->fns->acquire_target) {
         err = p->context->fns->acquire_target(p->context, params, fbo);
-        if (err < 0)
+        if (err < 0) {
+            pl_tex_destroy(gpu, &fbo);
             return err;
+        }
     }
 
     int depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0);
@@ -576,7 +584,11 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     valid = true;
 
 done:
-    if (!valid) // clear with purple to indicate error
+    // Clear with purple to indicate error. pl_tex_clear requires blit_dst,
+    // which wrapped host targets can lack (e.g. R10G10B10A2 has no blit_dst
+    // on some D3D11 drivers): skip the clear there rather than cascade a
+    // per-frame validation failure on top of the render error.
+    if (!valid && fbo->params.blit_dst)
         pl_tex_clear(gpu, fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
 
     // The host owns surface presentation; just flush libplacebo's commands
@@ -587,6 +599,17 @@ done:
     pl_gpu_flush(gpu);
     int present_err = p->context->fns->done_frame(p->context,
                                                   frame->display_synced);
+
+    // Destroy the wrap before returning: no reference on the host's surface
+    // may outlive mpv_render_context_render() (a host wrapping a DXGI
+    // backbuffer directly could never ResizeBuffers otherwise). All commands
+    // touching the target were flushed above, and drivers keep their own
+    // in-flight references, so dropping the app reference here is safe. If
+    // done_frame failed, the wrap is still released to libplacebo and the
+    // backend took recovery ownership -- never destroy a wrap libplacebo
+    // still holds.
+    if (present_err >= 0)
+        pl_tex_destroy(gpu, &fbo);
     return present_err < 0 ? present_err : 0;
 }
 

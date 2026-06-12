@@ -66,8 +66,21 @@ struct libmpv_pl_context_fns {
     int (*init)(struct libmpv_pl_context *ctx, mpv_render_param *params);
 
     // Wrap the host's render-target surface (described by params) as a
-    // pl_tex. Returns a libmpv error code; on success *out is valid until
-    // the next wrap_fbo() or done_frame() call.
+    // pl_tex. Returns a libmpv error code; on success the caller owns *out
+    // and must pl_tex_destroy() it before the current render-API entrypoint
+    // returns: a wrap may hold a reference on the host's surface (D3D11: one
+    // COM reference), and no such reference is allowed to outlive
+    // mpv_render_context_render() -- DXGI refuses ResizeBuffers while any
+    // app reference on a swapchain backbuffer is outstanding, so a retained
+    // wrap breaks hosts that render into the backbuffer directly.
+    //
+    // For externally-synchronized backends (acquire_target != NULL) the wrap
+    // must be "held by the user" when destroyed: destroy it after a
+    // successful done_frame(), or without any acquire_target attempt, or
+    // after a *failed* acquire_target (which must not have released the
+    // surface to libplacebo). After a failed done_frame() the wrap is still
+    // released to libplacebo -- the backend takes recovery ownership and the
+    // caller must NOT destroy it (see done_frame).
     int (*wrap_fbo)(struct libmpv_pl_context *ctx, mpv_render_param *params,
                     pl_tex *out);
 
@@ -91,6 +104,11 @@ struct libmpv_pl_context_fns {
     // libmpv error code so a failed present handshake (e.g. pl_vulkan_hold_ex
     // failing to hand the image back) propagates out of mpv_render_context_
     // render(). Backends with nothing to submit return 0.
+    //
+    // On failure the current wrap is still released to libplacebo, so the
+    // caller must not pl_tex_destroy() it (never destroy a wrap libplacebo
+    // still holds); ownership passes back to the backend, which reclaims (or,
+    // failing that, leaks) it on a later call or at destroy().
     int (*done_frame)(struct libmpv_pl_context *ctx, bool display_synced);
 
     // Free everything owned by the implementation, including ctx->gpu if the
