@@ -21,8 +21,10 @@
 #include "common/msg.h"
 #include "mpv/render_vulkan.h"
 #include "ta/ta_talloc.h"
+#include "video/out/gpu/context.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/libmpv.h"
+#include "video/out/placebo/ra_pl.h"
 #include "video/out/placebo/utils.h"
 
 struct priv {
@@ -83,6 +85,10 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
         return MPV_ERROR_UNSUPPORTED;
     }
     ctx->gpu = p->pl_vulkan->gpu;
+    ctx->ra_ctx = talloc_zero(p, struct ra_ctx);
+    ctx->ra_ctx->log = ctx->log;
+    ctx->ra_ctx->global = ctx->global;
+    ctx->ra = ctx->ra_ctx->ra = ra_create_pl(ctx->gpu, ctx->log);
     return 0;
 }
 
@@ -239,6 +245,8 @@ static void destroy(struct libmpv_pl_context *ctx)
             p->orphaned_fbo = NULL; // drop our ref without destroying
         }
     }
+    if (ctx->ra_ctx)
+        ra_free(&ctx->ra_ctx->ra);
     if (p->pl_vulkan)
         pl_vulkan_destroy(&p->pl_vulkan);
     if (ctx->pllog)
