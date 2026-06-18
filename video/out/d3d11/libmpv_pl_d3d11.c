@@ -37,9 +37,12 @@ static void uninit_ra(struct libmpv_pl_context *ctx)
     if (!ctx->ra_ctx)
         return;
 
-    ra_free(&ctx->ra_ctx->ra);
     if (ctx->ra_ctx->spirv && ctx->ra_ctx->spirv->fns->uninit)
         ctx->ra_ctx->spirv->fns->uninit(ctx->ra_ctx);
+    if (ctx->ra_ctx->ra) {
+        ctx->ra_ctx->ra->fns->destroy(ctx->ra_ctx->ra);
+        ctx->ra_ctx->ra = NULL;
+    }
     talloc_free(ctx->ra_ctx);
     ctx->ra_ctx = NULL;
     ctx->ra = NULL;

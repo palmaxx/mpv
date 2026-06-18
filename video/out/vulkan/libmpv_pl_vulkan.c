@@ -245,8 +245,10 @@ static void destroy(struct libmpv_pl_context *ctx)
             p->orphaned_fbo = NULL; // drop our ref without destroying
         }
     }
-    if (ctx->ra_ctx)
-        ra_free(&ctx->ra_ctx->ra);
+    if (ctx->ra_ctx && ctx->ra_ctx->ra) {
+        ctx->ra_ctx->ra->fns->destroy(ctx->ra_ctx->ra);
+        ctx->ra_ctx->ra = NULL;
+    }
     if (p->pl_vulkan)
         pl_vulkan_destroy(&p->pl_vulkan);
     if (ctx->pllog)
