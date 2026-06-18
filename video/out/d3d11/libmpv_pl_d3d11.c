@@ -21,13 +21,29 @@
 #include "common/msg.h"
 #include "mpv/render_d3d11.h"
 #include "ta/ta_talloc.h"
+#include "video/out/gpu/context.h"
+#include "video/out/gpu/spirv.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/libmpv.h"
 #include "video/out/placebo/utils.h"
+#include "ra_d3d11.h"
 
 struct priv {
     pl_d3d11 pl_d3d11;
 };
+
+static void uninit_ra(struct libmpv_pl_context *ctx)
+{
+    if (!ctx->ra_ctx)
+        return;
+
+    ra_free(&ctx->ra_ctx->ra);
+    if (ctx->ra_ctx->spirv && ctx->ra_ctx->spirv->fns->uninit)
+        ctx->ra_ctx->spirv->fns->uninit(ctx->ra_ctx);
+    talloc_free(ctx->ra_ctx);
+    ctx->ra_ctx = NULL;
+    ctx->ra = NULL;
+}
 
 static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
 {
@@ -69,6 +85,25 @@ static int init(struct libmpv_pl_context *ctx, mpv_render_param *params)
         return MPV_ERROR_UNSUPPORTED;
     }
     ctx->gpu = p->pl_d3d11->gpu;
+
+    // The hwdec interop needs an ra_d3d11 using the host's device. Rendering
+    // continues through libplacebo; this RA is only used for decoded surfaces.
+    ctx->ra_ctx = talloc_zero(p, struct ra_ctx);
+    ctx->ra_ctx->log = ctx->log;
+    ctx->ra_ctx->global = ctx->global;
+    if (!spirv_compiler_init(ctx->ra_ctx)) {
+        MP_WARN(ctx, "D3D11 hardware decoding is unavailable.\n");
+        uninit_ra(ctx);
+        return 0;
+    }
+
+    ctx->ra_ctx->ra = ra_d3d11_create(device, ctx->log, ctx->ra_ctx->spirv);
+    if (!ctx->ra_ctx->ra) {
+        MP_WARN(ctx, "D3D11 hardware decoding is unavailable.\n");
+        uninit_ra(ctx);
+        return 0;
+    }
+    ctx->ra = ctx->ra_ctx->ra;
     return 0;
 }
 
@@ -131,6 +166,7 @@ static void destroy(struct libmpv_pl_context *ctx)
     struct priv *p = ctx->priv;
     if (!p)
         return;
+    uninit_ra(ctx);
     if (p->pl_d3d11)
         pl_d3d11_destroy(&p->pl_d3d11);
     if (ctx->pllog)
