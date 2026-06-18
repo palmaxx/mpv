@@ -105,8 +105,8 @@ struct priv {
     struct gpu_next_osd_state osd_state;
 
     // Hwdec registry, driven by the core's hwdec_get hook. Mirrors the
-    // windowed VO; backed by the ra the per-API context-fns produced
-    // (ra_opengl for pl-opengl). load_all_by_default = true since this
+    // windowed VO; backed by the ra the per-API context-fns produced.
+    // load_all_by_default = true since this
     // backend does not route VOCTRL_LOAD_HWDEC_API for per-format loads.
     struct ra_hwdec_ctx hwdec_ctx;
 
@@ -175,11 +175,8 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
 
     // Stand up the hwdec registry so the core's map callback can resolve
     // ra_hwdec per source-frame imgfmt. The hwdec interops are ra-typed, so
-    // this needs an ra_ctx: only surface backends that build one (the GL
-    // backend, via libmpv_pl_context_gl) get hwdec. A backend exposing only a
-    // pl_gpu and no ra_ctx (the D3D11 surface backend in Plan-2 Phase 2) runs
-    // software-decode only -- the zero-initialised hwdec_ctx makes the core's
-    // hwdec_get find no interop. d3d11va interop on the render API is Phase 4.
+    // this needs an ra_ctx. A backend without one runs software-decode only;
+    // the zero-initialised hwdec_ctx makes the core's hwdec_get find no interop.
     // Otherwise same shape as vo_gpu_next preinit (load_all_by_default = true
     // mirrors libmpv_gpu.c since VOCTRL_LOAD_HWDEC_API is not wired through
     // vo_libmpv.c).
@@ -625,8 +622,8 @@ static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
 {
     struct priv *p = ctx->priv;
     update_options(p);
-    // The render backend has no swapchain (fallback_depth = 0) and no
-    // ra_ctx (want_alpha = false).
+    // The render backend has no swapchain, so fallback_depth is 0 and alpha
+    // output is disabled.
     gpu_next_core_screenshot(p->core, args, p->src, p->dst, p->osd_res,
                              0, false, &p->osd_state);
 }

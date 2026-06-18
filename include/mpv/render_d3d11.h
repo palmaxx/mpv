@@ -48,10 +48,9 @@ extern "C" {
  *   - and the same libplacebo render pipeline as the windowed --vo=gpu-next
  *     path.
  *
- * Source-frame decode: decoded frames are currently uploaded to the render
- * device (software interop), like the other render-API backends. Zero-copy
- * import of d3d11va-decoded surfaces on the render API is not yet implemented
- * for this backend; only the windowed --vo=gpu-next path does d3d11va interop.
+ * Source-frame decode: when d3d11va hardware decoding is available, mpv uses
+ * the host device for decoding and imports decoded surfaces without a copy.
+ * Software-decoded frames are uploaded to the same device.
  *
  * On non-Windows platforms, this header is still installed but the
  * MPV_RENDER_API_TYPE_PL_D3D11 backend is absent — mpv_render_context_create()
