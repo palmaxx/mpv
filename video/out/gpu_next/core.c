@@ -22,6 +22,7 @@
 #include <libplacebo/filters.h>
 #include <libplacebo/shaders/custom.h>
 
+#include "config.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/path.h"
@@ -29,8 +30,22 @@
 #include "stream/stream.h"
 #include "video/csputils.h"
 #include "video/mp_image.h"
+#include "video/out/gpu/hwdec.h"
+#include "video/out/gpu/utils.h"
 #include "video/out/gpu/video.h"
+#include "video/out/placebo/ra_pl.h"
 #include "video/out/vo.h"
+
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+#include <libplacebo/opengl.h>
+#include "video/out/opengl/ra_gl.h"
+#endif
+
+#if HAVE_D3D11 && defined(PL_HAVE_D3D11)
+#include <libplacebo/d3d11.h>
+#include "video/out/d3d11/ra_d3d11.h"
+#include "osdep/windows_utils.h"
+#endif
 
 struct scaler_params {
     struct pl_filter_config config;
@@ -41,6 +56,12 @@ struct user_hook {
     const struct pl_hook *hook;
 };
 
+struct gpu_next_hwdec_state {
+    struct ra_hwdec_mapper *mapper;
+    struct timer_pool *timer;
+    struct mp_pass_perf perf;
+};
+
 struct gpu_next_core {
     pl_gpu gpu;
     pl_log pllog;
@@ -49,6 +70,13 @@ struct gpu_next_core {
     pl_options pars;
     pl_renderer rr;
     pl_queue queue;
+
+    // Hwdec interop (mapper created lazily on the first hwdec frame and
+    // refreshed when params change; destroyed in gpu_next_core_destroy
+    // AFTER the queue so in-flight frames' release callbacks still see a
+    // valid mapper).
+    struct gpu_next_hwdec_state hwdec;
+    struct gpu_next_hwdec_state el_hwdec;
 
     // Allocated DR buffers
     mp_mutex dr_lock;
@@ -135,10 +163,18 @@ void gpu_next_core_destroy(struct gpu_next_core **core_ptr)
         return;
 
     // Release any in-flight frames first: their unmap returns DR buffers
-    // (so the assert below holds) and unmaps hwdec textures. The front-end
-    // must call gpu_next_core_destroy() before tearing down its hwdec
-    // interop so those unmaps stay valid.
+    // (so the assert below holds) and runs hwdec_release on hwdec frames
+    // (so the mapper must still exist). The front-end must call
+    // gpu_next_core_destroy() before tearing down its ra_hwdec_ctx so
+    // ra_hwdec_mapper_free() below stays valid.
     pl_queue_destroy(&core->queue);
+
+    ra_hwdec_mapper_free(&core->hwdec.mapper);
+    timer_pool_destroy(core->hwdec.timer);
+    core->hwdec.timer = NULL;
+    ra_hwdec_mapper_free(&core->el_hwdec.mapper);
+    timer_pool_destroy(core->el_hwdec.timer);
+    core->el_hwdec.timer = NULL;
 
     for (int i = 0; i < core->num_user_hooks; i++)
         pl_mpv_user_shader_destroy(&core->user_hooks[i].hook);
@@ -393,6 +429,182 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
     }
 
     return true;
+}
+
+static bool hwdec_reconfig(struct gpu_next_core *core,
+                           struct gpu_next_hwdec_state *state,
+                           struct ra *ra, struct ra_hwdec *hwdec,
+                           const struct mp_image_params *par)
+{
+    if (state->mapper) {
+        if (mp_image_params_static_equal(par, &state->mapper->src_params)) {
+            state->mapper->src_params.repr.dovi = par->repr.dovi;
+            state->mapper->dst_params.repr.dovi = par->repr.dovi;
+            state->mapper->src_params.color.hdr = par->color.hdr;
+            state->mapper->dst_params.color.hdr = par->color.hdr;
+            return true;
+        }
+        ra_hwdec_mapper_free(&state->mapper);
+        timer_pool_destroy(state->timer);
+        state->timer = NULL;
+    }
+
+    state->mapper = ra_hwdec_mapper_create(hwdec, par);
+    if (!state->mapper) {
+        MP_ERR(core, "Initializing texture for hardware decoding failed.\n");
+        return false;
+    }
+    state->timer = timer_pool_create(ra);
+    return true;
+}
+
+bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
+                                  struct ra_hwdec *hwdec,
+                                  const struct mp_image_params *par)
+{
+    return hwdec_reconfig(core, &core->hwdec, ra, hwdec, par);
+}
+
+bool gpu_next_core_hwdec_el_reconfig(struct gpu_next_core *core, struct ra *ra,
+                                     struct ra_hwdec *hwdec,
+                                     const struct mp_image_params *par)
+{
+    return hwdec_reconfig(core, &core->el_hwdec, ra, hwdec, par);
+}
+
+static const struct mp_image_params *hwdec_dst_params(
+    const struct gpu_next_hwdec_state *state)
+{
+    return &state->mapper->dst_params;
+}
+
+const struct mp_image_params *gpu_next_core_hwdec_dst_params(
+    const struct gpu_next_core *core)
+{
+    return hwdec_dst_params(&core->hwdec);
+}
+
+const struct mp_image_params *gpu_next_core_hwdec_el_dst_params(
+    const struct gpu_next_core *core)
+{
+    return hwdec_dst_params(&core->el_hwdec);
+}
+
+// For RAs not based on ra_pl, this creates a new pl_tex wrapper.
+static pl_tex hwdec_plane_tex(struct gpu_next_core *core,
+                              struct gpu_next_hwdec_state *state, int n)
+{
+    struct ra_tex *ratex = state->mapper->tex[n];
+    struct ra *ra = state->mapper->ra;
+    if (ra_pl_get(ra))
+        return (pl_tex) ratex->priv;
+
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+    if (ra_is_gl(ra) && pl_opengl_get(core->gpu)) {
+        struct pl_opengl_wrap_params par = {
+            .width = ratex->params.w,
+            .height = ratex->params.h,
+        };
+
+        ra_gl_get_format(ratex->params.format, &par.iformat,
+                         &(GLenum){0}, &(GLenum){0});
+        ra_gl_get_raw_tex(ra, ratex, &par.texture, &par.target);
+        return pl_opengl_wrap(core->gpu, &par);
+    }
+#endif
+
+#if HAVE_D3D11 && defined(PL_HAVE_D3D11)
+    if (ra_is_d3d11(ra)) {
+        int array_slice = 0;
+        ID3D11Resource *res = ra_d3d11_get_raw_tex(ra, ratex, &array_slice);
+        pl_tex tex = pl_d3d11_wrap(core->gpu, pl_d3d11_wrap_params(
+            .tex = res,
+            .array_slice = array_slice,
+            .fmt = ra_d3d11_get_format(ratex->params.format),
+            .w = ratex->params.w,
+            .h = ratex->params.h,
+        ));
+        SAFE_RELEASE(res);
+        return tex;
+    }
+#endif
+
+    MP_ERR(core, "Failed mapping hwdec frame? Open a bug!\n");
+    return NULL;
+}
+
+static bool hwdec_acquire(struct gpu_next_core *core,
+                          struct gpu_next_hwdec_state *state,
+                          struct mp_image *mpi, struct pl_frame *frame,
+                          const char *map_err)
+{
+    timer_pool_start(state->timer);
+    if (ra_hwdec_mapper_map(state->mapper, mpi) < 0) {
+        MP_ERR(core, "%s\n", map_err);
+        timer_pool_stop(state->timer);
+        return false;
+    }
+
+    for (int n = 0; n < frame->num_planes; n++) {
+        if (!(frame->planes[n].texture = hwdec_plane_tex(core, state, n))) {
+            timer_pool_stop(state->timer);
+            return false;
+        }
+    }
+
+    timer_pool_stop(state->timer);
+    state->perf = timer_pool_measure(state->timer);
+    return true;
+}
+
+bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
+                                 struct mp_image *mpi,
+                                 struct pl_frame *frame)
+{
+    return hwdec_acquire(core, &core->hwdec, mpi, frame,
+                         "Mapping hardware decoded surface failed.");
+}
+
+bool gpu_next_core_hwdec_el_acquire(struct gpu_next_core *core,
+                                    struct mp_image *mpi,
+                                    struct pl_frame *frame)
+{
+    return hwdec_acquire(core, &core->el_hwdec, mpi, frame,
+                         "Mapping enhancement-layer hwdec surface failed.");
+}
+
+static void hwdec_release(struct gpu_next_core *core,
+                          struct gpu_next_hwdec_state *state,
+                          struct pl_frame *frame)
+{
+    if (!ra_pl_get(state->mapper->ra)) {
+        for (int n = 0; n < frame->num_planes; n++)
+            pl_tex_destroy(core->gpu, &frame->planes[n].texture);
+    }
+
+    ra_hwdec_mapper_unmap(state->mapper);
+}
+
+void gpu_next_core_hwdec_release(struct gpu_next_core *core,
+                                 struct pl_frame *frame)
+{
+    hwdec_release(core, &core->hwdec, frame);
+}
+
+void gpu_next_core_hwdec_el_release(struct gpu_next_core *core,
+                                    struct pl_frame *frame)
+{
+    hwdec_release(core, &core->el_hwdec, frame);
+}
+
+struct mp_pass_perf gpu_next_core_hwdec_perf(const struct gpu_next_core *core)
+{
+    return core->hwdec.perf;
+}
+
+void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core)
+{
+    core->hwdec.perf.count = 0;
 }
 
 const struct pl_filter_config *gpu_next_core_map_scaler(

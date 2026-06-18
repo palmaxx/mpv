@@ -31,9 +31,13 @@
 #include "video/out/gpu/video.h"
 
 struct mp_image;
+struct mp_image_params;
 struct mp_log;
+struct mp_pass_perf;
 struct mpv_global;
 struct pl_hook;
+struct ra;
+struct ra_hwdec;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
 // vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
@@ -139,6 +143,68 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
                                     struct mp_image *mpi,
                                     pl_tex *tex,
                                     struct pl_frame *frame);
+
+// Hwdec interop owned by the core: per-decode ra_hwdec_mapper, its perf
+// timer, and the last perf sample. Mirrors how SW upload moved here --
+// the libplacebo-facing helpers live in the renderer core while the
+// libplacebo acquire/release callbacks themselves stay in the front-end
+// (which holds the stats_ctx the windowed VO wraps the map with, and
+// which has whatever ra_hwdec_ctx-equivalent registry makes sense for
+// it). The mapper's hwdec is looked up by the front-end and passed in
+// at reconfig time; the core does not own an ra back-pointer either, ra
+// is provided at reconfig (used only to lazily create the timer).
+
+// (Re-)configure the per-decode hwdec mapper for this frame's
+// format/colorspace. If params are static-equal to the existing
+// mapper's source params, fast-refreshes dovi/hdr metadata in place and
+// returns true. Otherwise destroys the existing mapper+timer and
+// creates new ones with the supplied hwdec. Returns false on
+// mapper-create failure (after logging via core->log).
+bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
+                                  struct ra_hwdec *hwdec,
+                                  const struct mp_image_params *par);
+bool gpu_next_core_hwdec_el_reconfig(struct gpu_next_core *core, struct ra *ra,
+                                     struct ra_hwdec *hwdec,
+                                     const struct mp_image_params *par);
+
+// Post-reconfig destination params, valid until the next reconfig. The
+// front-end uses these to drive pl_frame's color/repr/rotation under
+// hwdec.
+const struct mp_image_params *gpu_next_core_hwdec_dst_params(
+    const struct gpu_next_core *core);
+const struct mp_image_params *gpu_next_core_hwdec_el_dst_params(
+    const struct gpu_next_core *core);
+
+// Map a hwdec source frame: ra_hwdec_mapper_map() then populate
+// frame->planes[n].texture for the first frame->num_planes via the
+// per-RA-backend pl_tex wrap (ra_pl, opengl, d3d11). On success the
+// libplacebo render holds the planes until gpu_next_core_hwdec_release().
+// Returns false if the surface could not be mapped or any plane texture
+// could not be obtained. Internally times the work via the core's
+// hwdec timer; the caller wraps stats_time_start/_end around the call
+// since the libmpv backend may not have a stats_ctx.
+bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
+                                 struct mp_image *mpi,
+                                 struct pl_frame *frame);
+bool gpu_next_core_hwdec_el_acquire(struct gpu_next_core *core,
+                                    struct mp_image *mpi,
+                                    struct pl_frame *frame);
+
+// Symmetric release: for non-ra_pl RA backends destroys the per-plane
+// pl_tex wraps obtained at acquire time, then unmaps the mapper.
+void gpu_next_core_hwdec_release(struct gpu_next_core *core,
+                                 struct pl_frame *frame);
+void gpu_next_core_hwdec_el_release(struct gpu_next_core *core,
+                                    struct pl_frame *frame);
+
+// Last hwdec-map perf sample (set by the most recent successful
+// gpu_next_core_hwdec_acquire). Returns {0} after
+// gpu_next_core_hwdec_perf_reset() or before the first hwdec frame.
+struct mp_pass_perf gpu_next_core_hwdec_perf(const struct gpu_next_core *core);
+
+// Reset the hwdec perf counter, matching the windowed VO's reset at
+// SW-frame map time.
+void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core);
 
 // Map the mpv scaler option for the given unit to a libplacebo filter
 // config (caching the resolved config in the core), as vo_gpu maps its
