@@ -1390,6 +1390,13 @@ static bool hwdec_acquire(struct gpu_next_core *core,
 
     for (int n = 0; n < frame->num_planes; n++) {
         if (!(frame->planes[n].texture = hwdec_plane_tex(core, state, n))) {
+            if (!ra_pl_get(state->mapper->ra)) {
+                for (int i = 0; i < n; i++)
+                    pl_tex_destroy(core->gpu, &frame->planes[i].texture);
+            }
+            for (int i = 0; i < frame->num_planes; i++)
+                frame->planes[i].texture = NULL;
+            ra_hwdec_mapper_unmap(state->mapper);
             timer_pool_stop(state->timer);
             return false;
         }
