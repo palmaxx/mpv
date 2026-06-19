@@ -178,7 +178,8 @@ typedef struct mpv_vulkan_tex {
     VkImageUsageFlags usage;
     /**
      * The image layout the host leaves the image in when handing it to mpv
-     * (when acquire_sem fires). Passed to libplacebo as the release layout.
+     * (when acquire_sem fires). Passed to libplacebo as the current/acquire
+     * layout.
      */
     VkImageLayout current_layout;
     /**
