@@ -60,6 +60,13 @@ extern "C" {
  * racing the host's own queue use). VkImage ownership is transferred per frame
  * via the explicit acquire / release synchronization below.
  *
+ * mpv does not perform queue-family ownership transfers for the target image.
+ * If the imported device exposes more than one queue family to libplacebo, the
+ * image must use VK_SHARING_MODE_CONCURRENT with all of those family indices.
+ * A host using an exclusive image must expose only one family (normally the
+ * graphics/present family) by leaving the optional compute and transfer queue
+ * counts at 0.
+ *
  * Per-frame image synchronization
  * -------------------------------
  *
@@ -159,7 +166,9 @@ typedef struct mpv_vulkan_tex {
      * The render-target image. Must be a 2D, single-sample, single-mip color
      * image usable as a color attachment (and, for libplacebo's compute paths,
      * ideally VK_IMAGE_USAGE_STORAGE_BIT). Created by the same VkDevice passed
-     * at init. The host retains ownership; mpv does not destroy it.
+     * at init. It must satisfy the queue-family sharing requirements documented
+     * under "Threading" above. The host retains ownership; mpv does not destroy
+     * it.
      */
     VkImage image;
     /**

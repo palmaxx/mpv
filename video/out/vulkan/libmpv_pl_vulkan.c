@@ -186,8 +186,8 @@ static int acquire_target(struct libmpv_pl_context *ctx,
 
     // "Release" hands control to libplacebo: it waits on acquire_sem (if any),
     // treating the image as currently in current_layout. qf = IGNORED skips a
-    // queue-family transition (the wrapped image is concurrent across
-    // libplacebo's queues, and the host shares the same imported device).
+    // queue-family transition (the public API requires concurrent sharing when
+    // the host exposes multiple queue families to libplacebo).
     pl_vulkan_release_ex(ctx->gpu, pl_vulkan_release_params(
         .tex       = target,
         .layout    = vt->current_layout,
