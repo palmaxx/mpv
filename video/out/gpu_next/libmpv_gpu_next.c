@@ -238,6 +238,9 @@ static bool check_format(struct render_backend *ctx, int imgfmt)
     struct priv *p = ctx->priv;
     pl_gpu gpu = p->context->gpu;
 
+    if (ra_hwdec_get(&p->hwdec_ctx, imgfmt))
+        return true;
+
     return gpu_next_core_format_supported(gpu, imgfmt, false) ||
            gpu_next_core_format_supported(gpu, imgfmt, true);
 }
