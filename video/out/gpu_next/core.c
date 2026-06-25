@@ -257,6 +257,20 @@ struct gpu_next_core {
     enum pl_lut_type image_lut_type;
 };
 
+struct frame_priv {
+    struct gpu_next_core *core;
+    struct ra_hwdec *hwdec;
+    struct gpu_next_osd_state subs;
+    uint64_t osd_sync;
+};
+
+static bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
+                                    const struct pl_source_frame *src,
+                                    struct pl_frame *frame);
+static void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
+                                      const struct pl_source_frame *src);
+static void gpu_next_core_discard_frame(const struct pl_source_frame *src);
+
 static char *cache_filepath(void *ta_ctx, char *dir, const char *prefix, uint64_t key)
 {
     bstr filename = {0};
@@ -550,10 +564,10 @@ bool gpu_next_core_render_mix(struct gpu_next_core *core,
     return true;
 }
 
-bool gpu_next_core_render_image(struct gpu_next_core *core,
-                                const struct pl_frame *image,
-                                const struct pl_frame *target,
-                                const struct pl_render_params *params)
+static bool gpu_next_core_render_image(struct gpu_next_core *core,
+                                       const struct pl_frame *image,
+                                       const struct pl_frame *target,
+                                       const struct pl_render_params *params)
 {
     return pl_render_image(core->rr, image, target, params);
 }
@@ -1071,9 +1085,10 @@ struct mp_image *gpu_next_core_get_image(struct gpu_next_core *core,
     return mpi;
 }
 
-int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
-                                         struct pl_bit_encoding *out_bits,
-                                         enum mp_imgfmt imgfmt, bool use_uint)
+static int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
+                                                struct pl_bit_encoding *out_bits,
+                                                enum mp_imgfmt imgfmt,
+                                                bool use_uint)
 {
     struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(imgfmt);
     if (!desc.num_planes || !(desc.flags & MP_IMGFLAG_HAS_COMPS))
@@ -1180,11 +1195,11 @@ bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint)
     return true;
 }
 
-bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
-                                    struct ra *ra,
-                                    struct mp_image *mpi,
-                                    pl_tex *tex,
-                                    struct pl_frame *frame)
+static bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
+                                           struct ra *ra,
+                                           struct mp_image *mpi,
+                                           pl_tex *tex,
+                                           struct pl_frame *frame)
 {
     pl_gpu gpu = core->gpu;
 
@@ -1254,14 +1269,15 @@ bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
     return true;
 }
 
-void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core)
+static void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core)
 {
     core->sw_upload_perf.count = 0;
 }
 
-bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
-                                  struct ra_hwdec *hwdec,
-                                  const struct mp_image_params *par)
+static bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core,
+                                         struct ra *ra,
+                                         struct ra_hwdec *hwdec,
+                                         const struct mp_image_params *par)
 {
     if (core->hwdec_mapper) {
         if (mp_image_params_static_equal(par, &core->hwdec_mapper->src_params)) {
@@ -1285,7 +1301,7 @@ bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
     return true;
 }
 
-const struct mp_image_params *gpu_next_core_hwdec_dst_params(
+static const struct mp_image_params *gpu_next_core_hwdec_dst_params(
     const struct gpu_next_core *core)
 {
     return &core->hwdec_mapper->dst_params;
@@ -1333,9 +1349,9 @@ static pl_tex hwdec_plane_tex(struct gpu_next_core *core, int n)
     return NULL;
 }
 
-bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
-                                 struct mp_image *mpi,
-                                 struct pl_frame *frame)
+static bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
+                                        struct mp_image *mpi,
+                                        struct pl_frame *frame)
 {
     timer_pool_start(core->hwdec_timer);
     if (ra_hwdec_mapper_map(core->hwdec_mapper, mpi) < 0) {
@@ -1363,8 +1379,8 @@ bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
     return true;
 }
 
-void gpu_next_core_hwdec_release(struct gpu_next_core *core,
-                                 struct pl_frame *frame)
+static void gpu_next_core_hwdec_release(struct gpu_next_core *core,
+                                        struct pl_frame *frame)
 {
     if (!ra_pl_get(core->hwdec_mapper->ra)) {
         for (int n = 0; n < frame->num_planes; n++)
@@ -1374,7 +1390,7 @@ void gpu_next_core_hwdec_release(struct gpu_next_core *core,
     ra_hwdec_mapper_unmap(core->hwdec_mapper);
 }
 
-void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core)
+static void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core)
 {
     core->hwdec_perf.count = 0;
 }
@@ -1468,9 +1484,9 @@ const struct pl_filter_config *gpu_next_core_map_scaler(
     return &par->config;
 }
 
-const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
-                                              struct mpv_global *global,
-                                              const char *path)
+static const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
+                                                     struct mpv_global *global,
+                                                     const char *path)
 {
     if (!path || !path[0])
         return NULL;
@@ -1496,9 +1512,9 @@ const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
     return hook;
 }
 
-struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
-                                             struct mpv_global *global,
-                                             const char *path)
+static struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
+                                                    struct mpv_global *global,
+                                                    const char *path)
 {
     if (!path || !path[0])
         return NULL;
@@ -1533,14 +1549,14 @@ struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
     return lut;
 }
 
-void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex)
+static void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex)
 {
     if (!tex)
         return;
     MP_TARRAY_APPEND(core, core->sub_tex, core->num_sub_tex, tex);
 }
 
-pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core)
+static pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core)
 {
     pl_tex tex = NULL;
     MP_TARRAY_POP(core->sub_tex, core->num_sub_tex, &tex);
@@ -1575,9 +1591,9 @@ static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
     gpu_next_core_hwdec_release(fp->core, frame);
 }
 
-bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
-                             const struct pl_source_frame *src,
-                             struct pl_frame *frame)
+static bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
+                                    const struct pl_source_frame *src,
+                                    struct pl_frame *frame)
 {
     struct mp_image *mpi = src->frame_data;
     struct mp_image_params par = mpi->params;
@@ -1682,8 +1698,8 @@ bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
     return true;
 }
 
-void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
-                               const struct pl_source_frame *src)
+static void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
+                                      const struct pl_source_frame *src)
 {
     struct mp_image *mpi = src->frame_data;
     struct frame_priv *fp = mpi->priv;
@@ -1692,7 +1708,7 @@ void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
     talloc_free(mpi);
 }
 
-void gpu_next_core_discard_frame(const struct pl_source_frame *src)
+static void gpu_next_core_discard_frame(const struct pl_source_frame *src)
 {
     struct mp_image *mpi = src->frame_data;
     talloc_free(mpi);
@@ -2133,7 +2149,8 @@ AV_NOWARN_DEPRECATED(
     gpu_next_core_queue_set_flush(core, paused || !next_opts->inter_preserve);
 }
 
-void gpu_next_core_update_lut(struct gpu_next_core *core, struct user_lut *lut)
+static void gpu_next_core_update_lut(struct gpu_next_core *core,
+                                     struct user_lut *lut)
 {
     if (!lut->opt || !lut->opt[0]) {
         lut->lut = NULL;
@@ -2315,9 +2332,9 @@ void gpu_next_core_apply_target_icc(struct gpu_next_core *core,
     target->icc = core->icc_profile;
 }
 
-void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
-                                         struct pl_color_space *color,
-                                         float min_luma)
+static void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
+                                                struct pl_color_space *color,
+                                                float min_luma)
 {
     // Auto mode, use target value if available
     if (!opts->target_contrast) {

@@ -97,13 +97,11 @@ struct libmpv_pl_context_fns {
     int (*acquire_target)(struct libmpv_pl_context *ctx,
                           mpv_render_param *params, pl_tex target);
 
-    // Signal end-of-render (the analogue of libmpv_gpu_context_fns.done_frame).
-    // For externally-synchronized surfaces this is the "release" half paired
-    // with acquire_target: transfer the target back to the host in its
-    // requested final layout, signalling the release semaphore. Returns a
-    // libmpv error code so a failed present handshake (e.g. pl_vulkan_hold_ex
-    // failing to hand the image back) propagates out of mpv_render_context_
-    // render(). Backends with nothing to submit return 0.
+    // Optional. Signal end-of-render (the analogue of
+    // libmpv_gpu_context_fns.done_frame). For externally-synchronized surfaces
+    // this is the "release" half paired with acquire_target: transfer the
+    // target back to the host in its requested final layout, signalling the
+    // release semaphore. NULL means there is nothing to submit.
     //
     // On failure the current wrap is still released to libplacebo, so the
     // caller must not pl_tex_destroy() it (never destroy a wrap libplacebo
