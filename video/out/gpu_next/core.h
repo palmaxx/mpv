@@ -199,52 +199,6 @@ struct gpu_next_osd_state {
     struct pl_overlay overlays[MAX_OSD_PARTS];
 };
 
-// Per-source-frame private data, hung off mp_image->priv for every frame
-// pushed into the queue and allocated as a talloc child of that mp_image
-// by gpu_next_core_queue_push. Used by the core's map/unmap callbacks;
-// the front-end's screenshot path reads frame_priv.subs back.
-struct frame_priv {
-    // Back-reference to the owning core, set by the front-end at push.
-    struct gpu_next_core *core;
-
-    // hwdec resolved for this frame (NULL for software frames), looked
-    // up by gpu_next_core_map_frame.
-    struct ra_hwdec *hwdec;
-    // Optional Dolby Vision FEL.
-    struct ra_hwdec *el_hwdec;
-    pl_tex el_tex[4];
-    struct pl_frame el_frame;
-
-    // Per-frame blended-subtitle overlay cache, populated by the
-    // front-end's overlay loop; unmap returns its textures to the pool.
-    struct gpu_next_osd_state subs;
-    uint64_t osd_sync;
-};
-
-// pl_queue map/unmap/discard callbacks owned by the core. The front-end's
-// push loop installs all three on the pl_source_frame; centralising them
-// gives the libmpv render backend the exact same frame-ingest path with
-// zero callback duplication.
-//
-// map turns an mpv source frame into a pl_frame: it resolves hwdec via
-// the front-end interface, builds the pl_frame colorspace/representation
-// (applying the hdr-reference-white and treat-srgb-as-power22 option
-// tweaks), then either uploads the software planes
-// (gpu_next_core_upload_sw_planes, wrapped in the front-end's
-// "swdec-upload" timer) or sets up the hwdec planes with the core's own
-// acquire/release callbacks, and attaches the resolved image LUT. On
-// failure it frees mpi and returns false (mainline's map_frame contract).
-//
-// unmap returns the frame's OSD overlay textures to the core's sub_tex
-// recycle pool and frees the mp_image; discard (a frame dropped before
-// it was ever mapped) just frees the mp_image.
-bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
-                             const struct pl_source_frame *src,
-                             struct pl_frame *frame);
-void gpu_next_core_unmap_frame(pl_gpu gpu, struct pl_frame *frame,
-                               const struct pl_source_frame *src);
-void gpu_next_core_discard_frame(const struct pl_source_frame *src);
-
 // The libplacebo options/render-params object owned by the core. The
 // front-end populates pars->params before driving the render.
 pl_options gpu_next_core_options(struct gpu_next_core *core);
@@ -351,13 +305,6 @@ bool gpu_next_core_render_mix(struct gpu_next_core *core,
                               struct pl_frame *target,
                               const struct pl_render_params *params);
 
-// Render a single image into target (the screenshot path). Returns false
-// on libplacebo render failure.
-bool gpu_next_core_render_image(struct gpu_next_core *core,
-                                const struct pl_frame *image,
-                                const struct pl_frame *target,
-                                const struct pl_render_params *params);
-
 // Render a screenshot of the current frame into args->res. args is the
 // VOCTRL_SCREENSHOT request; src/dst/osd_res are the front-end's current
 // geometry (used for windowed screenshots); fallback_depth is the
@@ -418,104 +365,8 @@ struct mp_image *gpu_next_core_get_image(struct gpu_next_core *core,
                                          int imgfmt, int w, int h,
                                          int stride_align, int flags);
 
-// Derive libplacebo plane upload descriptors (and, optionally, the shared
-// bit encoding) from an mpv image format. Pure format math; returns the
-// number of planes, or 0 if the format cannot be uploaded directly.
-int gpu_next_core_plane_data_from_imgfmt(struct pl_plane_data out_data[4],
-                                         struct pl_bit_encoding *out_bits,
-                                         enum mp_imgfmt imgfmt, bool use_uint);
-
 // Whether the GPU can directly upload software frames of this mpv format.
 bool gpu_next_core_format_supported(pl_gpu gpu, int format, bool use_uint);
-
-// Upload the software-decoded planes of `mpi` into the supplied texture
-// slot, using the core's DR-buffer pool for zero-copy when applicable,
-// and fill the corresponding pl_plane / pl_plane_data fields of `frame`.
-// Sets frame->num_planes and frame->repr.bits. Mirrors how vo_gpu's
-// SW-upload is shared between the windowed VO and libmpv_gpu via
-// gl_video; the libmpv render API (no pl_swapchain) will drive the same
-// entry point. The upload is self-timed into the core's SW-upload perf
-// counter (gpu_next_core_sw_upload_perf); `ra` is used only to create
-// that timer lazily on the first software frame.
-//
-// Returns false on libplacebo upload failure, in which case mpi and any
-// ref kept for an async upload callback have already been talloc_freed
-// (matching mainline's map_frame failure path); the front-end's outer
-// stats wrapping should be closed and the caller should propagate false
-// back to pl_queue. On success the lifetime contract is the existing
-// one: pl_queue holds the source-frame's mpi ref until unmap, and the
-// additional ref held for the async-callback path is released by
-// libplacebo when it is done with the buffer.
-bool gpu_next_core_upload_sw_planes(struct gpu_next_core *core,
-                                    struct ra *ra,
-                                    struct mp_image *mpi,
-                                    pl_tex *tex,
-                                    struct pl_frame *frame);
-
-// Reset the SW-upload perf counter (count -> 0), called when a hwdec
-// frame is mapped so a stale SW sample is not reported. The sample
-// itself (measured by gpu_next_core_upload_sw_planes) is consumed
-// internally by gpu_next_core_get_perf_data.
-void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core);
-
-// Hwdec interop owned by the core: per-decode ra_hwdec_mapper, its perf
-// timer, and the last perf sample. Mirrors how SW upload moved here --
-// the libplacebo-facing helpers live in the renderer core while the
-// libplacebo acquire/release callbacks themselves stay in the front-end
-// (which holds the stats_ctx the windowed VO wraps the map with, and
-// which has whatever ra_hwdec_ctx-equivalent registry makes sense for
-// it). The mapper's hwdec is looked up by the front-end and passed in
-// at reconfig time; the core does not own an ra back-pointer either, ra
-// is provided at reconfig (used only to lazily create the timer).
-
-// (Re-)configure the per-decode hwdec mapper for this frame's
-// format/colorspace. If params are static-equal to the existing
-// mapper's source params, fast-refreshes dovi/hdr metadata in place and
-// returns true. Otherwise destroys the existing mapper+timer and
-// creates new ones with the supplied hwdec. Returns false on
-// mapper-create failure (after logging via core->log).
-bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core, struct ra *ra,
-                                  struct ra_hwdec *hwdec,
-                                  const struct mp_image_params *par);
-bool gpu_next_core_hwdec_el_reconfig(struct gpu_next_core *core, struct ra *ra,
-                                     struct ra_hwdec *hwdec,
-                                     const struct mp_image_params *par);
-
-// Post-reconfig destination params, valid until the next reconfig. The
-// front-end uses these to drive pl_frame's color/repr/rotation under
-// hwdec.
-const struct mp_image_params *gpu_next_core_hwdec_dst_params(
-    const struct gpu_next_core *core);
-const struct mp_image_params *gpu_next_core_hwdec_el_dst_params(
-    const struct gpu_next_core *core);
-
-// Map a hwdec source frame: ra_hwdec_mapper_map() then populate
-// frame->planes[n].texture for the first frame->num_planes via the
-// per-RA-backend pl_tex wrap (ra_pl, opengl, d3d11). On success the
-// libplacebo render holds the planes until gpu_next_core_hwdec_release().
-// Returns false if the surface could not be mapped or any plane texture
-// could not be obtained. Internally times the work via the core's
-// hwdec timer; the caller wraps stats_time_start/_end around the call
-// since the libmpv backend may not have a stats_ctx.
-bool gpu_next_core_hwdec_acquire(struct gpu_next_core *core,
-                                 struct mp_image *mpi,
-                                 struct pl_frame *frame);
-bool gpu_next_core_hwdec_el_acquire(struct gpu_next_core *core,
-                                    struct mp_image *mpi,
-                                    struct pl_frame *frame);
-
-// Symmetric release: for non-ra_pl RA backends destroys the per-plane
-// pl_tex wraps obtained at acquire time, then unmaps the mapper.
-void gpu_next_core_hwdec_release(struct gpu_next_core *core,
-                                 struct pl_frame *frame);
-void gpu_next_core_hwdec_el_release(struct gpu_next_core *core,
-                                    struct pl_frame *frame);
-
-// Reset the hwdec-map perf counter, called when a SW frame is mapped so
-// a stale hwdec sample is not reported. The sample itself (set by the
-// most recent successful gpu_next_core_hwdec_acquire) is consumed
-// internally by gpu_next_core_get_perf_data.
-void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core);
 
 // Map the mpv scaler option for the given unit to a libplacebo filter
 // config (caching the resolved config in the core), as vo_gpu maps its
@@ -523,33 +374,6 @@ void gpu_next_core_hwdec_perf_reset(struct gpu_next_core *core);
 const struct pl_filter_config *gpu_next_core_map_scaler(
     struct gpu_next_core *core, const struct gl_video_opts *opts,
     enum scaler_unit unit);
-
-// Load (and cache, across options updates) the user shader at the given
-// path as a libplacebo hook, or NULL on failure/empty path. The cache is
-// owned by the core and freed in gpu_next_core_destroy().
-const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
-                                              struct mpv_global *global,
-                                              const char *path);
-
-// Load (and cache, across options updates) the LUT (cube format) at the
-// given path as a libplacebo pl_custom_lut, or NULL on failure/empty
-// path. Mirrors gpu_next_core_load_hook: one cache shared across the
-// image/lut/target_lut call sites in the windowed VO (the libmpv backend
-// will share the same cache). Cache failures (path -> NULL) so a broken
-// file is not re-loaded every frame. The cache is owned by the core and
-// freed in gpu_next_core_destroy().
-struct pl_custom_lut *gpu_next_core_load_lut(struct gpu_next_core *core,
-                                             struct mpv_global *global,
-                                             const char *path);
-
-// OSD overlay-texture recycle pool. gpu_next_core_unmap_frame hands a
-// released source frame's OSD textures back to the pool (sub_tex_push),
-// and gpu_next_core_update_overlays pops a recyclable tex when building
-// the next frame's overlays (sub_tex_pop, returns NULL when empty -- the
-// caller then allocates fresh). The pool is destroyed in
-// gpu_next_core_destroy.
-void gpu_next_core_sub_tex_push(struct gpu_next_core *core, pl_tex tex);
-pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core);
 
 // Render the front-end's OSD/subtitle bitmaps (osd_render over the OSD
 // source set with gpu_next_core_set_osd) into *frame as pl_overlays,
@@ -579,13 +403,6 @@ void gpu_next_core_update_render_options(struct gpu_next_core *core,
                                          const struct gl_next_opts *next_opts,
                                          bool paused);
 
-// Resolve a user LUT option (--lut / --image-lut / --target-lut): when
-// its path changed, (re)load the LUT through the core's shared LUT cache
-// and update the user_lut's path tracker. The front-end calls this
-// directly only for the target LUT (in its target-frame setup);
-// gpu_next_core_update_options handles the main and image LUTs.
-void gpu_next_core_update_lut(struct gpu_next_core *core, struct user_lut *lut);
-
 // Resolve the per-draw gpu-next options into the core's pl_options: the
 // main / image LUTs, the colour-equalizer adjustment and the
 // libplacebo-opts raw passthrough. The front-end calls this every draw,
@@ -607,11 +424,6 @@ enum pl_color_levels gpu_next_core_output_levels(struct gpu_next_core *core);
 // draw, before the render.
 void gpu_next_core_update_hooks_dynamic(struct gpu_next_core *core,
                                         const struct mp_image *mpi);
-
-// Apply the target-contrast option to a colorspace (pure; no swapchain).
-void gpu_next_core_apply_target_contrast(const struct gl_video_opts *opts,
-                                         struct pl_color_space *color,
-                                         float min_luma);
 
 // Resolve all target-frame options into *target: the target LUT, the
 // gl_video_opts colorspace / peak / contrast / gamut overrides, dither

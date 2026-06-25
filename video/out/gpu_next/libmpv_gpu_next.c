@@ -592,13 +592,12 @@ done:
         pl_tex_clear(gpu, fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
 
     // The host owns surface presentation; just flush libplacebo's commands
-    // so they are visible once the host uses the FBO. done_frame completes the
-    // present handshake (for Vulkan, the release half); a failure there is
-    // reported to the host even when the frame itself rendered fine. A failed
-    // render (above) still shows purple and returns success, as before.
+    // so they are visible once the host uses the FBO. Backends with explicit
+    // hand-back sync (Vulkan) complete it in done_frame.
     pl_gpu_flush(gpu);
-    int present_err = p->context->fns->done_frame(p->context,
-                                                  frame->display_synced);
+    int present_err = p->context->fns->done_frame
+        ? p->context->fns->done_frame(p->context, frame->display_synced)
+        : 0;
 
     // Destroy the wrap before returning: no reference on the host's surface
     // may outlive mpv_render_context_render() (a host wrapping a DXGI

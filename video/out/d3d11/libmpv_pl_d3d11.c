@@ -155,15 +155,6 @@ static int wrap_fbo(struct libmpv_pl_context *ctx, mpv_render_param *params,
     return 0;
 }
 
-static int done_frame(struct libmpv_pl_context *ctx, bool display_synced)
-{
-    // The libmpv render API has no swapchain: the host owns surface
-    // presentation, so there is nothing to submit here. D3D11 command
-    // submission happens through libplacebo's immediate-context recording
-    // and is flushed by render_backend_gpu_next via pl_gpu_flush().
-    return 0;
-}
-
 static void destroy(struct libmpv_pl_context *ctx)
 {
     struct priv *p = ctx->priv;
@@ -180,6 +171,5 @@ const struct libmpv_pl_context_fns libmpv_pl_context_d3d11 = {
     .api_name = MPV_RENDER_API_TYPE_PL_D3D11,
     .init = init,
     .wrap_fbo = wrap_fbo,
-    .done_frame = done_frame,
     .destroy = destroy,
 };
