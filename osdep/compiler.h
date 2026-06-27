@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MP_EXPAND_ARGS(...) __VA_ARGS__
 
@@ -48,7 +49,10 @@
 #define MP_NO_ASAN
 #endif
 
-#ifndef NDEBUG
+#if !defined(NDEBUG) && __has_builtin(__builtin_unreachable)
+#define MP_ASSERT_UNREACHABLE() \
+    do { assert(!"unreachable"); __builtin_unreachable(); } while (0)
+#elif !defined(NDEBUG)
 #define MP_ASSERT_UNREACHABLE() (assert(!"unreachable"), abort())
 #elif __has_builtin(__builtin_unreachable)
 #define MP_ASSERT_UNREACHABLE() __builtin_unreachable()
