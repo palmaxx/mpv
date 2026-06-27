@@ -43,7 +43,10 @@
 #define MP_NONSTRING
 #endif
 
-#ifndef NDEBUG
+#if !defined(NDEBUG) && __has_builtin(__builtin_unreachable)
+#define MP_ASSERT_UNREACHABLE() \
+    do { assert(!"unreachable"); __builtin_unreachable(); } while (0)
+#elif !defined(NDEBUG)
 #define MP_ASSERT_UNREACHABLE() assert(!"unreachable")
 #elif __has_builtin(__builtin_unreachable)
 #define MP_ASSERT_UNREACHABLE() __builtin_unreachable()

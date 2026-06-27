@@ -275,11 +275,12 @@ static bool reorder_planes(struct mp_aframe *mpa, int *reorder,
         return false;
 
     int num_planes = mp_aframe_get_planes(mpa);
+    if (num_planes < 0 || num_planes > MP_NUM_CHANNELS)
+        return false;
     uint8_t **planes = mp_aframe_get_data_rw(mpa);
     if (num_planes && !planes)
         return false;
     uint8_t *old_planes[MP_NUM_CHANNELS];
-    mp_assert(num_planes <= MP_NUM_CHANNELS);
     for (int n = 0; n < num_planes; n++)
         old_planes[n] = planes[n];
 
