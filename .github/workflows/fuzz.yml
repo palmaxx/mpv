@@ -39,7 +39,7 @@ jobs:
         oss-fuzz-project-name: 'mpv'
         language: c
         sanitizer: ${{ matrix.sanitizer }}
-        project-src-path: ${{ github.workspace }}
+        project-src-path: .
     - name: Run Fuzzers (${{ matrix.sanitizer }})
       uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
       with:
