@@ -80,11 +80,8 @@ struct gl_next_opts {
 extern const struct m_sub_options gl_next_conf;
 
 // Front-end-agnostic libplacebo render core, shared by the windowed
-// vo_gpu_next VO and (incrementally) the libmpv render backend, mirroring
-// how gl_video is shared by vo_gpu.c and libmpv_gpu.c. The renderer
-// itself is migrated here in later, individually golden-frame-gated
-// steps; it currently owns the direct-rendering pool, the resolved
-// scaler/user-shader state and the libplacebo options object.
+// vo_gpu_next VO and the libmpv render backend, mirroring how gl_video is
+// shared by vo_gpu.c and libmpv_gpu.c.
 struct gpu_next_core;
 
 // Create the render core on an existing pl_gpu. global/opts drive the
@@ -184,10 +181,7 @@ void gpu_next_core_set_image_lut(struct gpu_next_core *core,
 void gpu_next_core_set_osd(struct gpu_next_core *core, struct osd_state *osd);
 
 // libplacebo OSD overlay state for one frame's worth of subtitle/OSD
-// bitmaps: a recyclable texture plus its built pl_overlay parts, per OSD
-// part slot. mpv's core already has an (opaque) struct osd_state in
-// sub/osd_state.h, so this one -- VO-private until it moved into this
-// shared header -- carries the gpu_next_ prefix to avoid the clash.
+// bitmaps. The gpu_next_ prefix avoids clashing with sub/osd_state.h.
 struct gpu_next_osd_entry {
     pl_tex tex;
     struct pl_overlay_part *parts;
@@ -286,20 +280,9 @@ void gpu_next_core_update_frames(struct gpu_next_core *core,
 // VO does so on a resize that moves the src/dst/osd rects.
 void gpu_next_core_osd_changed(struct gpu_next_core *core);
 
-// Render a frame mix into target (the windowed VO's draw_frame path).
-// Swapchain-free: the front-end acquires target, drives the colorspace
-// hint, and presents the result; the same entry point will back the
-// libmpv render API, which has no pl_swapchain. On success the renderer's
-// internal HDR-metadata state and target (color/repr/rotation) have been
-// updated in place by the post-render inference (mirroring mainline's
-// unused pl_frames_infer_mix follow-up), so the caller may then read
-// target back and call gpu_next_core_get_hdr_metadata(). Returns false on
-// libplacebo render failure, in which case the caller clears target
-// itself and the inference is skipped (as in mainline).
-//
-// The core installs its own render-pass perf info callback on the params
-// for this call (read back via gpu_next_core_get_perf_data); the caller
-// does not provide one.
+// Render a frame mix into target. The front-end owns target acquisition,
+// colorspace hints, and presentation. On success, target and the renderer's
+// HDR metadata are updated in place for the caller to inspect.
 bool gpu_next_core_render_mix(struct gpu_next_core *core,
                               const struct pl_frame_mix *mix,
                               struct pl_frame *target,
@@ -339,10 +322,7 @@ void gpu_next_core_get_perf_data(struct gpu_next_core *core,
                                  struct voctrl_performance_data *perf);
 
 // Wrap pl_renderer_flush_cache(): drop renderer state related to peak
-// detection and frame mixing, which the front-end calls on seek (after
-// pl_queue_reset). This was the last raw-renderer use in the windowed
-// VO; the libmpv render backend will use the same entry point as its
-// seek hook.
+// detection and frame mixing after a seek/reset.
 void gpu_next_core_flush_cache(struct gpu_next_core *core);
 
 // Number of source frames the renderer needs queued at draw time for
@@ -468,11 +448,8 @@ void gpu_next_core_apply_crop(struct pl_frame *frame, struct mp_rect crop,
                               int width, int height);
 
 // What the caller must do with the swapchain colorspace hint after
-// gpu_next_core_target_hint() produced it. The hint math is kept free of
-// any swapchain access (the backend-reported target colorspace is passed
-// in via target_csp; set_colorspace_hint is driven by the caller per this
-// action) so the same computation backs both the windowed VO and the
-// libmpv render API, which has no pl_swapchain.
+// gpu_next_core_target_hint() produced it. The hint math is swapchain-free so
+// it works for both the windowed VO and the libmpv render API.
 enum target_hint_action {
     TARGET_HINT_NONE = 0,   // leave the swapchain hint untouched
     TARGET_HINT_SET,        // hint(&out_hint)
@@ -480,13 +457,7 @@ enum target_hint_action {
 };
 
 // Swapchain-free computation of the libplacebo target colorspace hint.
-// target_csp is the backend-reported target colorspace on input (zeroed
-// if unavailable); it is post-processed in place and also consumed by the
-// caller afterwards. source is the current frame's colorspace, or NULL if
-// there is no current frame. target_hint/target_hint_mode are the
-// corresponding gl_next_opts fields. The core's ICC object/params are
-// refreshed in place (pl_icc_update). Behaviour is identical to the
-// inline block this was extracted from.
+// target_csp is post-processed in place; source may be NULL.
 enum target_hint_action gpu_next_core_target_hint(
     struct gpu_next_core *core,
     const struct gl_video_opts *opts, int target_hint, int target_hint_mode,
