@@ -1559,12 +1559,13 @@ static const struct pl_hook *gpu_next_core_load_hook(struct gpu_next_core *core,
     }
 
     char *fname = mp_get_user_path(NULL, global, path);
-    bstr shader = stream_read_file(fname, core, global, 1000000000); // 1GB
+    bstr shader = stream_read_file(fname, NULL, global, 1000000000); // 1GB
     talloc_free(fname);
 
     const struct pl_hook *hook = NULL;
     if (shader.len)
         hook = pl_mpv_user_shader_parse(core->gpu, shader.start, shader.len);
+    talloc_free(shader.start);
 
     MP_TARRAY_APPEND(core, core->user_hooks, core->num_user_hooks, (struct user_hook) {
         .path = talloc_strdup(core, path),
