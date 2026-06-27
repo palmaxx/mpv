@@ -160,6 +160,7 @@ bool equal_mpv_value(const void *a, const void *b, int format)
     }
     }
     MP_ASSERT_UNREACHABLE(); // supposed to be able to handle all defined types
+    return false;
 }
 
 // Remarks see equal_mpv_value().
