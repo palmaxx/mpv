@@ -31,6 +31,7 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "misc/io_utils.h"
+#include "misc/path_utils.h"
 #include "options/m_config.h"
 #include "options/m_option.h"
 #include "options/options.h"
@@ -128,7 +129,6 @@ struct gpu_next_hwdec_state {
 struct user_lut_cache_entry {
     char *path;
     struct pl_custom_lut *lut;
-};
 };
 
 struct frame_info {
@@ -266,6 +266,9 @@ struct gpu_next_core {
 struct frame_priv {
     struct gpu_next_core *core;
     struct ra_hwdec *hwdec;
+    struct ra_hwdec *el_hwdec;
+    pl_tex el_tex[4];
+    struct pl_frame el_frame;
     struct gpu_next_osd_state subs;
     uint64_t osd_sync;
 };
@@ -697,7 +700,7 @@ void gpu_next_core_screenshot(struct gpu_next_core *core,
 
     if (args->scaled) {
         // Apply target LUT, ICC profile and CSP override only in window mode
-        gpu_next_core_apply_target_options(core, &target, 0, false,
+        gpu_next_core_apply_target_options(core, &target, 0, false, 0, NULL,
                                            fallback_depth);
     } else if (args->native_csp) {
         target.color = image.color;
@@ -1283,9 +1286,39 @@ static void gpu_next_core_sw_upload_perf_reset(struct gpu_next_core *core)
     core->sw_upload_perf.count = 0;
 }
 
+static bool hwdec_reconfig(struct gpu_next_core *core,
+                           struct gpu_next_hwdec_state *state,
+                           struct ra *ra, struct ra_hwdec *hwdec,
+                           const struct mp_image_params *par)
+{
+    if (state->mapper) {
+        if (mp_image_params_static_equal(par, &state->mapper->src_params)) {
+            state->mapper->src_params.repr.dovi = par->repr.dovi;
+            state->mapper->dst_params.repr.dovi = par->repr.dovi;
+            state->mapper->src_params.color.hdr = par->color.hdr;
+            state->mapper->dst_params.color.hdr = par->color.hdr;
+            return true;
+        }
+
+        ra_hwdec_mapper_free(&state->mapper);
+        timer_pool_destroy(state->timer);
+        state->timer = NULL;
+    }
+
+    state->mapper = ra_hwdec_mapper_create(hwdec, par);
+    if (!state->mapper) {
+        MP_ERR(core, "Initializing texture for hardware decoding failed.\n");
+        return false;
+    }
+
+    if (ra)
+        state->timer = timer_pool_create(ra);
+    return true;
+}
+
 static bool gpu_next_core_hwdec_reconfig(struct gpu_next_core *core,
-                                           struct ra *ra,
-                                           struct ra_hwdec *hwdec,
+                                            struct ra *ra,
+                                            struct ra_hwdec *hwdec,
                                            const struct mp_image_params *par)
 {
     return hwdec_reconfig(core, &core->hwdec, ra, hwdec, par);
@@ -1630,7 +1663,7 @@ static pl_tex gpu_next_core_sub_tex_pop(struct gpu_next_core *core)
 // on the pl_frame by gpu_next_core_map_frame. They wrap the core's hwdec
 // interop in the front-end's optional "hwdec-map" timer (the windowed VO
 // has a stats_ctx; the libmpv backend leaves the timer hooks NULL).
-static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
+static bool hwdec_frame_acquire(pl_gpu gpu, struct pl_frame *frame)
 {
     struct mp_image *mpi = frame->user_data;
     struct frame_priv *fp = mpi->priv;
@@ -1647,12 +1680,34 @@ static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
     return ok;
 }
 
-static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
+static void hwdec_frame_release(pl_gpu gpu, struct pl_frame *frame)
 {
     struct mp_image *mpi = frame->user_data;
     struct frame_priv *fp = mpi->priv;
     gpu_next_core_hwdec_release(fp->core, frame);
 }
+
+#if PL_API_VER >= 367
+static bool hwdec_acquire_el(pl_gpu gpu, struct pl_frame *frame)
+{
+    struct mp_image *bl_mpi = frame->user_data;
+    struct mp_image *el_mpi = bl_mpi->enhancement_layer;
+    struct frame_priv *fp = bl_mpi->priv;
+    struct gpu_next_core *core = fp->core;
+    if (!gpu_next_core_hwdec_el_reconfig(core, core->fe.ra, fp->el_hwdec,
+                                         &el_mpi->params))
+        return false;
+
+    return gpu_next_core_hwdec_el_acquire(core, el_mpi, frame);
+}
+
+static void hwdec_release_el(pl_gpu gpu, struct pl_frame *frame)
+{
+    struct mp_image *mpi = frame->user_data;
+    struct frame_priv *fp = mpi->priv;
+    gpu_next_core_hwdec_el_release(fp->core, frame);
+}
+#endif
 
 static bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
                                     const struct pl_source_frame *src,
@@ -1707,8 +1762,8 @@ static bool gpu_next_core_map_frame(pl_gpu gpu, pl_tex *tex,
         gpu_next_core_sw_upload_perf_reset(core);
 
         struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
-        frame->acquire = hwdec_acquire;
-        frame->release = hwdec_release;
+        frame->acquire = hwdec_frame_acquire;
+        frame->release = hwdec_frame_release;
         setup_hwdec_plane_mapping(frame, &desc);
     } else { // swdec
         gpu_next_core_hwdec_perf_reset(core);
@@ -2041,10 +2096,7 @@ static void update_hook_opts(struct gpu_next_core *core, char **opts,
     if (!opts)
         return;
 
-    const char *basename = mp_basename(shaderpath);
-    struct bstr shadername;
-    if (!mp_splitext(basename, &shadername))
-        shadername = bstr0(basename);
+    struct bstr shadername = mp_strip_ext(mp_basename_bstr(bstr0(shaderpath)));
 
     for (int n = 0; opts[n * 2]; n++) {
         struct bstr k = bstr0(opts[n * 2 + 0]);

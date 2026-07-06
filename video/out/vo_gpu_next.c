@@ -130,6 +130,20 @@ static bool set_colorspace_hint(struct priv *p, struct pl_color_space *hint)
     return false;
 }
 
+// Effective reference white luminance in nits to assume for SDR content.
+static float get_ref_luma(struct priv *p)
+{
+    const struct gl_video_opts *opts = p->opts_cache->opts;
+    if (opts->hdr_reference_white)
+        return opts->hdr_reference_white;
+
+    struct ra_swapchain *sw = p->ra_ctx->swapchain;
+    if (sw->fns->target_ref_luma)
+        return sw->fns->target_ref_luma(sw);
+
+    return 0;
+}
+
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *p = vo->priv;
