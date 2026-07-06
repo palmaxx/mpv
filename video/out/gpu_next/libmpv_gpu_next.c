@@ -533,7 +533,8 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     // finalize. Absent host data reproduces the prior unconditional behaviour.
     struct pl_color_space target_csp = target_known ? host_csp
                                                     : (struct pl_color_space){0};
-    gpu_next_core_apply_target_options(p->core, &target, 0, target_known, depth);
+    gpu_next_core_apply_target_options(p->core, &target, 0, target_known, 0,
+                                       &target_csp, depth);
     gpu_next_core_finalize_target_csp(p->core, &target, frame->current,
                                       &target_csp, !target_known);
 
