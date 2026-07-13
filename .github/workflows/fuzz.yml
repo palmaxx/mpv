@@ -22,6 +22,7 @@ permissions: {}
 
 jobs:
   Fuzzing:
+    if: github.repository == 'mpv-player/mpv'
     runs-on: ubuntu-latest
     permissions:
       security-events: write

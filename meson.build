@@ -65,6 +65,7 @@ sources = files(
     'audio/filter/af_drop.c',
     'audio/filter/af_format.c',
     'audio/filter/af_lavcac3enc.c',
+    'audio/filter/af_lavfi_tempo.c',
     'audio/filter/af_scaletempo.c',
     'audio/filter/af_scaletempo2.c',
     'audio/filter/af_scaletempo2_internals.c',
@@ -106,6 +107,7 @@ sources = files(
     'demux/demux_playlist.c',
     'demux/demux_raw.c',
     'demux/demux_timeline.c',
+    'demux/dovi_split.c',
     'demux/ebml.c',
     'demux/packet.c',
     'demux/packet_pool.c',
@@ -117,6 +119,7 @@ sources = files(
     'filters/f_auto_filters.c',
     'filters/f_decoder_wrapper.c',
     'filters/f_demux_in.c',
+    'filters/f_enhancement_pair.c',
     'filters/f_hwtransfer.c',
     'filters/f_lavfi.c',
     'filters/f_output_chain.c',
@@ -197,6 +200,8 @@ sources = files(
     'stream/stream_mpv.c',
     'stream/stream_null.c',
     'stream/stream_slice.c',
+    'stream/stream_bstr.c',
+    'stream/stream_env.c',
 
     ## Subtitles
     'sub/ass_mp.c',
@@ -260,6 +265,8 @@ sources = files(
     'video/out/placebo/utils.c',
     'video/out/vo_gpu_next.c',
     'video/out/gpu_next/context.c',
+    'video/out/gpu_next/core.c',
+    'video/out/gpu_next/libmpv_gpu_next.c',
 
     ## osdep
     'osdep/io.c',
@@ -623,11 +630,12 @@ if darwin
     subdir(join_paths('TOOLS', 'osxbundle'))
 endif
 
-libcurl = dependency('libcurl', version: '>= 7.87.0', required: get_option('libcurl'))
+libcurl = dependency('libcurl', version: '>= 7.88.0', required: get_option('libcurl'))
 features += {'libcurl': libcurl.found()}
 if features['libcurl']
     dependencies += [libcurl]
-    sources += files('stream/stream_curl.c')
+    sources += files('demux/avio_crypto.c',
+                     'stream/stream_curl.c')
 endif
 
 cdda_opt = get_option('cdda').require(
@@ -782,7 +790,10 @@ if features['uchardet']
     dependencies += uchardet
 endif
 
-vapoursynth = dependency('vapoursynth', version: '>= 56', required: get_option('vapoursynth'))
+vapoursynth = dependency('vapoursynth-script', version: '>= 56', required: false)
+if not vapoursynth.found()
+    vapoursynth = dependency('vapoursynth', version: '>= 56', required: get_option('vapoursynth'))
+endif
 features += {'vapoursynth': vapoursynth.found()}
 if features['vapoursynth']
     dependencies += vapoursynth.partial_dependency(compile_args: true, includes: true)
@@ -1049,6 +1060,9 @@ features += {'d3d11': d3d11.allowed()}
 if features['d3d11']
     sources += files('video/out/d3d11/context.c',
                      'video/out/d3d11/ra_d3d11.c')
+    if libplacebo.get_variable('pl_has_d3d11', default_value: '0') == '1'
+        sources += files('video/out/d3d11/libmpv_pl_d3d11.c')
+    endif
 endif
 
 wayland = {
@@ -1309,6 +1323,9 @@ if features['gl']
                      'video/out/opengl/libmpv_gl.c',
                      'video/out/opengl/ra_gl.c',
                      'video/out/opengl/utils.c')
+    if libplacebo.get_variable('pl_has_opengl', default_value: '0') == '1'
+        sources += files('video/out/opengl/libmpv_pl_gl.c')
+    endif
 elif not features['gl'] and get_option('gl').enabled()
     error('gl enabled but no OpenGL video output could be found!')
 endif
@@ -1331,6 +1348,9 @@ if features['vulkan']
                      'video/out/vulkan/context.c',
                      'video/out/vulkan/utils.c',
                      'video/filter/vf_gpu_vulkan.c')
+    if libplacebo.get_variable('pl_has_vulkan', default_value: '0') == '1'
+        sources += files('video/out/vulkan/libmpv_pl_vulkan.c')
+    endif
 endif
 
 if features['vulkan'] and features['android']
@@ -1825,7 +1845,8 @@ if get_option('libmpv')
                  description: 'mpv media player client library')
 
     headers = ['include/mpv/client.h', 'include/mpv/render.h',
-               'include/mpv/render_gl.h', 'include/mpv/stream_cb.h']
+               'include/mpv/render_gl.h', 'include/mpv/render_d3d11.h',
+               'include/mpv/render_vulkan.h', 'include/mpv/stream_cb.h']
     install_headers(headers, subdir: 'mpv')
 
     # Allow projects to build with libmpv by cloning into ./subprojects/mpv
