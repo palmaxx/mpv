@@ -1,0 +1,13 @@
+# label<TAB>clip<TAB>pts<TAB>width<TAB>height<TAB>colorspace<TAB>format<TAB>hwdec
+#
+# Copy this file outside the repository (or to a git-ignored local file), replace
+# the example clip paths with your mounted Plex fixtures, then pass it to
+# rapi_macos_run.sh --manifest. Paths may contain spaces; fields must remain
+# tab-separated. `hwdec` is `no` for the deterministic software-decode baseline
+# and `yes` for the VideoToolbox zero-copy gate.
+#
+# Suggested real-media matrix:
+# sdr<TAB>/Volumes/PLEX/...SDR sample...<TAB>3.0<TAB>1280<TAB>720<TAB>srgb<TAB>rgba8<TAB>no
+# hdr10<TAB>/Volumes/PLEX/...HDR10 sample...<TAB>2.0<TAB>1920<TAB>1080<TAB>pq2020<TAB>rgb10a2<TAB>yes
+# dv81<TAB>/Volumes/PLEX/...Dolby Vision Profile 8.1 sample...<TAB>2.0<TAB>1920<TAB>1080<TAB>pq2020<TAB>rgb10a2<TAB>yes
+# dv5<TAB>/Volumes/PLEX/...Dolby Vision Profile 5 sample...<TAB>2.0<TAB>1920<TAB>1080<TAB>pq2020<TAB>rgb10a2<TAB>yes

@@ -23,8 +23,18 @@ elif [ -f "$ROOT/build/libmpv.so" ]; then
      -I"$ROOT/include" $(pkg-config --cflags libplacebo vulkan) \
      -L"$BUILD" -lmpv $(pkg-config --libs libplacebo vulkan) \
      -Wl,-rpath,"$BUILD"
+elif [ -f "$ROOT/build-macos-minimal/libmpv.dylib" ]; then
+  # macOS: the local minimal build links libmpv against MoltenVK/Vulkan. The
+  # harness itself is headless, but creates a real MoltenVK device and proves
+  # the render API's VkImage acquire/release path.
+  BUILD="$ROOT/build-macos-minimal"
+  OUT="$HERE/rapi_harness_vulkan"
+  cc -O2 -g -Wall -o "$OUT" "$HERE/rapi_harness_vulkan.c" \
+     -I"$ROOT/include" $(pkg-config --cflags libplacebo vulkan) \
+     -L"$BUILD" -lmpv $(pkg-config --libs libplacebo vulkan) \
+     -Wl,-rpath,"$BUILD"
 else
-  echo "no libmpv build found (looked for bld/libmpv.dll.a and build/libmpv.so)"
+  echo "no libmpv build found (looked for bld/libmpv.dll.a, build/libmpv.so, and build-macos-minimal/libmpv.dylib)"
   exit 1
 fi
 

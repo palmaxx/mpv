@@ -32,6 +32,14 @@
 
 #define API_TYPE MPV_RENDER_API_TYPE_PL_VULKAN
 
+#ifdef __APPLE__
+// Vulkan-Headers only exposes these names through vulkan_beta.h and
+// vulkan_metal.h. This harness only needs their string names for device
+// creation, so keep the source compatible with both SDK and Homebrew headers.
+#define MPV_VK_PORTABILITY_SUBSET "VK_KHR_portability_subset"
+#define MPV_VK_METAL_OBJECTS       "VK_EXT_metal_objects"
+#endif
+
 static void die(const char *msg)
 {
     fprintf(stderr, "FATAL: %s\n", msg);
@@ -55,9 +63,51 @@ static VkQueue          g_queue;
 static uint32_t         g_qfam;
 static const char      *g_dev_exts[128];
 static uint32_t         g_num_dev_exts;
+static bool             g_hwdec;
+static bool             g_saw_hw_download;
+
+static bool has_extension(const VkExtensionProperties *avail, uint32_t count,
+                          const char *name)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (strcmp(name, avail[i].extensionName) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void add_device_extension(const char *name)
+{
+    for (uint32_t i = 0; i < g_num_dev_exts; i++) {
+        if (strcmp(name, g_dev_exts[i]) == 0)
+            return;
+    }
+    if (g_num_dev_exts == sizeof(g_dev_exts) / sizeof(g_dev_exts[0]))
+        die("too many Vulkan device extensions");
+    g_dev_exts[g_num_dev_exts++] = name;
+}
 
 static void vk_init(void)
 {
+    const char *inst_exts[4] = {0};
+    uint32_t num_inst_exts = 0;
+    VkInstanceCreateFlags inst_flags = 0;
+
+#ifdef __APPLE__
+    // MoltenVK requires portability enumeration. This is deliberately a
+    // hard requirement for the macOS gate: silently selecting no physical
+    // device would make a passing probe meaningless.
+    uint32_t in = 0;
+    VK(vkEnumerateInstanceExtensionProperties(NULL, &in, NULL));
+    VkExtensionProperties *iavail = calloc(in ? in : 1, sizeof(*iavail));
+    VK(vkEnumerateInstanceExtensionProperties(NULL, &in, iavail));
+    if (!has_extension(iavail, in, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+        die("MoltenVK did not advertise VK_KHR_portability_enumeration");
+    free(iavail);
+    inst_exts[num_inst_exts++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    inst_flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
     VkApplicationInfo app = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "rapi_harness_vulkan",
@@ -66,6 +116,9 @@ static void vk_init(void)
     VkInstanceCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app,
+        .flags = inst_flags,
+        .enabledExtensionCount = num_inst_exts,
+        .ppEnabledExtensionNames = inst_exts,
     };
     VK(vkCreateInstance(&ici, NULL, &g_inst));
 
@@ -115,12 +168,29 @@ static void vk_init(void)
         const char *want = pl_vulkan_recommended_extensions[i];
         for (uint32_t j = 0; j < en; j++) {
             if (strcmp(want, avail[j].extensionName) == 0) {
-                if (g_num_dev_exts < 128)
-                    g_dev_exts[g_num_dev_exts++] = want;
+                add_device_extension(want);
                 break;
             }
         }
     }
+
+#ifdef __APPLE__
+    // Apple devices expose this extension through MoltenVK. It is required by
+    // the Vulkan portability contract, even though the renderer itself does
+    // not use a presentable surface in this headless harness.
+    if (!has_extension(avail, en, MPV_VK_PORTABILITY_SUBSET))
+        die("MoltenVK device did not advertise VK_KHR_portability_subset");
+    add_device_extension(MPV_VK_PORTABILITY_SUBSET);
+
+    // The VideoToolbox interop imports CVMetalTexture planes. Only require the
+    // Metal-object extension for the hwdec gate: the software-decode render
+    // gate remains useful on older MoltenVK versions that lack this bridge.
+    if (g_hwdec) {
+        if (!has_extension(avail, en, MPV_VK_METAL_OBJECTS))
+            die("MoltenVK device did not advertise VK_EXT_metal_objects");
+        add_device_extension(MPV_VK_METAL_OBJECTS);
+    }
+#endif
     free(avail);
 
     // Create the device with libplacebo's required features chained in pNext
@@ -245,6 +315,8 @@ static void drain_log(mpv_handle *mpv)
             break;
         if (ev->event_id == MPV_EVENT_LOG_MESSAGE) {
             mpv_event_log_message *m = ev->data;
+            if (g_hwdec && strstr(m->text, "HW-downloading"))
+                g_saw_hw_download = true;
             fprintf(stderr, "[mpv:%s] %s: %s", m->level, m->prefix, m->text);
         }
     }
@@ -368,9 +440,10 @@ static int run_render(const char *clip, const char *pts, int w, int h,
     mpv_set_option_string(mpv, "dither-depth", "8");
     mpv_set_option_string(mpv, "hr-seek", "yes");
     mpv_set_option_string(mpv, "start", pts);
+    mpv_set_option_string(mpv, "hwdec", g_hwdec ? "videotoolbox" : "no");
     if (mpv_initialize(mpv) < 0)
         die("mpv_initialize failed");
-    mpv_request_log_messages(mpv, "error");
+    mpv_request_log_messages(mpv, g_hwdec ? "v" : "error");
 
     mpv_vulkan_init_params vp = vk_init_params();
     mpv_render_param cparams[] = {
@@ -418,6 +491,8 @@ static int run_render(const char *clip, const char *pts, int w, int h,
             die("mpv shut down before a frame was rendered");
         if (ev->event_id == MPV_EVENT_LOG_MESSAGE) {
             mpv_event_log_message *m = ev->data;
+            if (g_hwdec && strstr(m->text, "HW-downloading"))
+                g_saw_hw_download = true;
             fprintf(stderr, "[mpv:%s] %s: %s", m->level, m->prefix, m->text);
         }
         if (ev->event_id == MPV_EVENT_PLAYBACK_RESTART)
@@ -530,23 +605,60 @@ static int run_render(const char *clip, const char *pts, int w, int h,
 
     void *mapped = NULL;
     VK(vkMapMemory(g_dev, buf_mem, 0, npix, 0, &mapped));
+    bool uniform = true;
+    const uint8_t *pixels = mapped;
+    for (size_t k = 1; k < npix; k++) {
+        if (pixels[k] != pixels[0]) {
+            uniform = false;
+            break;
+        }
+    }
     FILE *f = fopen(out, "wb");
     if (!f || fwrite(mapped, 1, npix, f) != npix)
         die("writing raw output failed");
     fclose(f);
     vkUnmapMemory(g_dev, buf_mem);
 
+    // Drain any decode/interop diagnostics emitted by the render call before
+    // evaluating the zero-copy gate and writing its sidecar.
+    drain_log(mpv);
     char *pixfmt = mpv_get_property_string(mpv, "video-params/pixelformat");
+    char *hwdec_current = g_hwdec ? mpv_get_property_string(mpv, "hwdec-current") : NULL;
+    char *drop_count = g_hwdec ? mpv_get_property_string(mpv, "decoder-frame-drop-count") : NULL;
     char sidecar[512];
     snprintf(sidecar, sizeof(sidecar), "%s.txt", out);
     f = fopen(sidecar, "w");
     if (f) {
         fprintf(f, "width=%d\nheight=%d\npixelformat=%s\nsurface=vulkan\n"
-                   "vkformat=%d\ncsp=%d\nbpp=%d\n",
-                w, h, pixfmt ? pixfmt : "?", (int)fmt, (int)csp, bpp);
+                   "vkformat=%d\ncsp=%d\nbpp=%d\nhwdec_requested=%d\n"
+                   "hwdec_current=%s\nhw_downloading=%d\n"
+                   "decoder_frame_drop_count=%s\nnon_uniform=%d\n",
+                w, h, pixfmt ? pixfmt : "?", (int)fmt, (int)csp, bpp,
+                g_hwdec, hwdec_current ? hwdec_current : "(null)",
+                g_saw_hw_download, drop_count ? drop_count : "?", !uniform);
         fclose(f);
     }
     mpv_free(pixfmt);
+
+    int rc = 0;
+    if (g_hwdec) {
+        bool engaged = hwdec_current && strstr(hwdec_current, "videotoolbox");
+        printf("hwdec: hwdec-current=%s decoder-frame-drop-count=%s "
+               "hw-downloading=%d non-uniform=%d\n",
+               hwdec_current ? hwdec_current : "(null)",
+               drop_count ? drop_count : "?", g_saw_hw_download, !uniform);
+        if (!engaged || g_saw_hw_download || uniform) {
+            fprintf(stderr,
+                    "FAIL: expected zero-copy VideoToolbox rendering "
+                    "(engaged=%d download=%d uniform=%d)\n",
+                    engaged, g_saw_hw_download, uniform);
+            rc = 1;
+        } else {
+            printf("PASS: VideoToolbox engaged through the Vulkan render API\n");
+        }
+    }
+    mpv_free(hwdec_current);
+    mpv_free(drop_count);
 
     printf("rendered %s @ %s -> %s (%dx%d, %zu bytes)\n",
            clip, pts, out, w, h, npix);
@@ -562,27 +674,37 @@ static int run_render(const char *clip, const char *pts, int w, int h,
     vkDestroyImage(g_dev, img, NULL);
     vkFreeMemory(g_dev, img_mem, NULL);
     vk_uninit();
-    return 0;
+    return rc;
 }
 
 int main(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "--probe") == 0)
+    int a = 1;
+    for (; a < argc; a++) {
+        if (strcmp(argv[a], "--hwdec") == 0)
+            g_hwdec = true;
+        else
+            break;
+    }
+    argc -= a;
+    argv += a;
+
+    if (argc >= 1 && strcmp(argv[0], "--probe") == 0)
         return run_probe();
 
-    if (argc >= 6 && argc <= 8) {
-        int w = atoi(argv[3]), h = atoi(argv[4]);
+    if (argc >= 5 && argc <= 7) {
+        int w = atoi(argv[2]), h = atoi(argv[3]);
         if (w <= 0 || h <= 0)
             die("width/height must be positive");
-        enum csp_mode csp = parse_csp(argc >= 7 ? argv[6] : NULL);
+        enum csp_mode csp = parse_csp(argc >= 6 ? argv[5] : NULL);
         int bpp;
-        VkFormat fmt = parse_fmt(argc >= 8 ? argv[7] : NULL, &bpp);
-        return run_render(argv[1], argv[2], w, h, argv[5], csp, fmt, bpp);
+        VkFormat fmt = parse_fmt(argc >= 7 ? argv[6] : NULL, &bpp);
+        return run_render(argv[0], argv[1], w, h, argv[4], csp, fmt, bpp);
     }
 
     fprintf(stderr,
-            "usage: rapi_harness_vulkan --probe\n"
-            "       rapi_harness_vulkan <clip> <pts> <w> <h> <out.raw> "
+            "usage: rapi_harness_vulkan [--hwdec] --probe\n"
+            "       rapi_harness_vulkan [--hwdec] <clip> <pts> <w> <h> <out.raw> "
             "[none|srgb|pq2020] [rgba8|rgb10a2|rgba16f]\n");
     return 1;
 }
