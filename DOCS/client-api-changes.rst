@@ -32,6 +32,32 @@ API changes
 
 ::
 
+ 2.7    - add MPV_RENDER_API_TYPE_PL_D3D11 and the associated render parameters
+          MPV_RENDER_PARAM_D3D11_INIT_PARAMS and MPV_RENDER_PARAM_D3D11_TEX, plus
+          the new header render_d3d11.h. Wraps a host-provided ID3D11Device and
+          ID3D11Texture2D as a libplacebo target surface, enabling HDR-capable
+          render-API hosts on Windows.
+        - add MPV_RENDER_PARAM_TARGET_COLORSPACE and the
+          mpv_render_param_target_colorspace struct (plus the helper types
+          mpv_color_primaries, mpv_color_transfer, mpv_hdr_metadata) for
+          host-side target-surface colorspace and HDR metadata negotiation,
+          orthogonal to the chosen graphics API.
+        - add MPV_RENDER_API_TYPE_PL_VULKAN and the associated render parameters
+          MPV_RENDER_PARAM_VULKAN_INIT_PARAMS and MPV_RENDER_PARAM_VULKAN_TEX,
+          plus the new header render_vulkan.h. Wraps a host-provided VkDevice
+          and VkImage as a libplacebo target surface, the cross-platform
+          (Linux/Wayland, Vulkan-on-Windows) sibling of MPV_RENDER_API_TYPE_PL_D3D11.
+        - the libplacebo-based render API backends (PL_OPENGL, PL_D3D11,
+          PL_VULKAN) no longer retain their wrap of the host's target surface
+          between calls: any reference the renderer takes on the host's
+          texture/image (D3D11: one COM reference) is released before
+          mpv_render_context_render() returns. Hosts may render into a DXGI
+          swapchain backbuffer directly and call ResizeBuffers between render
+          calls. See render_d3d11.h / render_vulkan.h for the per-API lifetime
+          contract.
+ 2.6    - add MPV_RENDER_API_TYPE_PL_OPENGL, which exposes the libplacebo-based
+          gpu-next renderer through the libmpv render API. See render.h and
+          render_gl.h. Uses the same init/FBO params as MPV_RENDER_API_TYPE_OPENGL.
  --- mpv 0.40.0 ---
  2.5    - Deprecate MPV_RENDER_PARAM_AMBIENT_LIGHT. no replacement.
  --- mpv 0.39.0 ---
