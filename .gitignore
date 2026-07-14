@@ -1,3 +1,12 @@
 /subprojects/*
 !/subprojects/packagefiles
 !/subprojects/*.wrap
+
+# Local render-API test artifacts and binaries. The harness source is tracked;
+# its video fixtures, raw captures, logs, and per-Mac golden baselines are not.
+/_golden/render_api/rapi_harness_vulkan
+/_golden/render_api/*.exe
+/_golden/render_api/rapi_harness_vulkan.dSYM/
+/_golden/render_api/macos_cases.tsv
+/_golden/render_api/baseline_macos_vk/
+/_golden/render_api/cand_macos_vk/
