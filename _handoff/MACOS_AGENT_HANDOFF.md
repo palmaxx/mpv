@@ -2,18 +2,18 @@
 
 ## Start state
 
-- Fork branch: `agent/macos-handoff`
-- Audited source commit: `024e4c45f974e7dc418a4a32e1dbebd3aada588f`
+- Fork branch: `agent/rebase-upstream-20260714-handoff`
+- Audited source commit: `4347588dea` on `agent/rebase-upstream-20260714`
 - ARCA source: use the private ARCA release branch; its SwiftUI shell is still a
   stub and must be linked to the native core/libmpv on macOS.
 - License target: build mpv/FFmpeg without GPL or nonfree inputs. ARCA remains
   proprietary; the dynamically loaded mpv/FFmpeg components retain LGPL terms.
 
-### Current local worktrees (2026-07-13)
+### macOS worktrees after syncing the candidate
 
 | Checkout | Branch | Purpose |
 |---|---|---|
-| `/Users/leo/depy/mpv` | `agent/macos-handoff` | Mac libmpv build and validation harness worktree. |
+| `/Users/leo/depy/mpv` | `agent/rebase-upstream-20260714-handoff` | Mac libmpv build and validation harness worktree. |
 | `/Users/leo/depy/arca` | `agent/arca-nongpl-release` | ARCA source to port next. Its macOS shell remains a SwiftUI stub. |
 
 The harness source is tracked. Local build material remains under `_deps/` and
@@ -194,7 +194,7 @@ VideoToolbox/MoltenVK path.
 
 ## Rebase boundary
 
-This release is based on upstream `33111f3212ee272ac4a79fe284a7b55c9b5be997`.
-Upstream had advanced by 21 commits when this handoff branch was prepared. Do
-not mix that rebase into the validated release commit; start the next rebase as
-a separate planned branch and repeat the build/audit gates.
+The candidate is based on upstream `e5486b96d7d06dd148337899bfdc46bf25101663`,
+including the 21 commits that followed the previous validated release base.
+Windows builds and source audits pass; repeat the macOS build and MoltenVK /
+VideoToolbox gates before promoting the candidate to `main`.
