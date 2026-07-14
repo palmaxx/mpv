@@ -83,7 +83,8 @@ while IFS=$'\t' read -r label clip pts width height csp fmt hwdec extra; do
     continue
   fi
   if [ "$hwdec" = yes ]; then
-    if ! grep -Eq '^hwdec_current=.*videotoolbox' "$raw.txt" || \
+    if ! grep -qx 'pixelformat=videotoolbox' "$raw.txt" || \
+       ! grep -Eq '^hwdec_current=.*videotoolbox' "$raw.txt" || \
        ! grep -qx 'hw_downloading=0' "$raw.txt"; then
       echo "FAIL $label: VideoToolbox zero-copy proof missing; see $raw.txt" >&2
       rc=1

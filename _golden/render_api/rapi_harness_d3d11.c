@@ -448,8 +448,6 @@ static int run_render(const char *clip, const char *pts, int w, int h,
                 w, h, pixfmt ? pixfmt : "?", fmt_name, csp_name[csp]);
         fclose(f);
     }
-    mpv_free(pixfmt);
-
     printf("rendered %s @ %s -> %s (%dx%d, %zu bytes)\n",
            clip, pts, out, w, h, npix);
 
@@ -463,18 +461,24 @@ static int run_render(const char *clip, const char *pts, int w, int h,
         char *cur = mpv_get_property_string(mpv, "hwdec-current");
         char *drops = mpv_get_property_string(mpv, "decoder-frame-drop-count");
         bool engaged = cur && strstr(cur, "d3d11va");
+        bool hwfmt = pixfmt && strstr(pixfmt, "d3d11");
         // A genuine decoded frame varies; a uniform buffer means blank/error.
         bool uniform = true;
-        for (size_t k = 1; k < npix; k++) {
-            if (pix[k] != pix[0]) { uniform = false; break; }
+        for (size_t k = bpp; k < npix; k += bpp) {
+            if (memcmp(pix, pix + k, bpp) != 0) { uniform = false; break; }
         }
-        printf("hwdec: hwdec-current=%s decoder-frame-drop-count=%s "
+        printf("hwdec: hwdec-current=%s pixelformat=%s decoder-frame-drop-count=%s "
                "non-uniform=%d\n", cur ? cur : "(null)",
-               drops ? drops : "?", !uniform);
+               pixfmt ? pixfmt : "(null)", drops ? drops : "?", !uniform);
         if (!engaged) {
             fprintf(stderr, "FAIL: hwdec-current=%s, expected d3d11va "
                     "(hardware decode did not engage through the render API)\n",
                     cur ? cur : "(null)");
+            rc = 1;
+        }
+        if (!hwfmt) {
+            fprintf(stderr, "FAIL: pixelformat=%s, expected a d3d11 hardware frame\n",
+                    pixfmt ? pixfmt : "(null)");
             rc = 1;
         }
         if (uniform) {
@@ -488,6 +492,7 @@ static int run_render(const char *clip, const char *pts, int w, int h,
         mpv_free(drops);
     }
 
+    mpv_free(pixfmt);
     free(pix);
     ID3D11Texture2D_Release(staging);
     mpv_render_context_free(rctx);

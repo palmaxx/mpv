@@ -66,6 +66,7 @@ static uint32_t         g_num_dev_exts;
 static bool             g_hwdec;
 static bool             g_saw_hw_download;
 
+#ifdef __APPLE__
 static bool has_extension(const VkExtensionProperties *avail, uint32_t count,
                           const char *name)
 {
@@ -75,6 +76,7 @@ static bool has_extension(const VkExtensionProperties *avail, uint32_t count,
     }
     return false;
 }
+#endif
 
 static void add_device_extension(const char *name)
 {
@@ -607,8 +609,8 @@ static int run_render(const char *clip, const char *pts, int w, int h,
     VK(vkMapMemory(g_dev, buf_mem, 0, npix, 0, &mapped));
     bool uniform = true;
     const uint8_t *pixels = mapped;
-    for (size_t k = 1; k < npix; k++) {
-        if (pixels[k] != pixels[0]) {
+    for (size_t k = bpp; k < npix; k += bpp) {
+        if (memcmp(pixels, pixels + k, bpp) != 0) {
             uniform = false;
             break;
         }
@@ -638,25 +640,26 @@ static int run_render(const char *clip, const char *pts, int w, int h,
                 g_saw_hw_download, drop_count ? drop_count : "?", !uniform);
         fclose(f);
     }
-    mpv_free(pixfmt);
-
     int rc = 0;
     if (g_hwdec) {
         bool engaged = hwdec_current && strstr(hwdec_current, "videotoolbox");
-        printf("hwdec: hwdec-current=%s decoder-frame-drop-count=%s "
+        bool hwfmt = pixfmt && strstr(pixfmt, "videotoolbox");
+        printf("hwdec: hwdec-current=%s pixelformat=%s decoder-frame-drop-count=%s "
                "hw-downloading=%d non-uniform=%d\n",
                hwdec_current ? hwdec_current : "(null)",
-               drop_count ? drop_count : "?", g_saw_hw_download, !uniform);
-        if (!engaged || g_saw_hw_download || uniform) {
+               pixfmt ? pixfmt : "(null)", drop_count ? drop_count : "?",
+               g_saw_hw_download, !uniform);
+        if (!engaged || !hwfmt || g_saw_hw_download || uniform) {
             fprintf(stderr,
                     "FAIL: expected zero-copy VideoToolbox rendering "
-                    "(engaged=%d download=%d uniform=%d)\n",
-                    engaged, g_saw_hw_download, uniform);
+                    "(engaged=%d hwfmt=%d download=%d uniform=%d)\n",
+                    engaged, hwfmt, g_saw_hw_download, uniform);
             rc = 1;
         } else {
             printf("PASS: VideoToolbox engaged through the Vulkan render API\n");
         }
     }
+    mpv_free(pixfmt);
     mpv_free(hwdec_current);
     mpv_free(drop_count);
 
