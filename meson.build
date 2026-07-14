@@ -265,6 +265,8 @@ sources = files(
     'video/out/placebo/utils.c',
     'video/out/vo_gpu_next.c',
     'video/out/gpu_next/context.c',
+    'video/out/gpu_next/core.c',
+    'video/out/gpu_next/libmpv_gpu_next.c',
 
     ## osdep
     'osdep/io.c',
@@ -1058,6 +1060,9 @@ features += {'d3d11': d3d11.allowed()}
 if features['d3d11']
     sources += files('video/out/d3d11/context.c',
                      'video/out/d3d11/ra_d3d11.c')
+    if libplacebo.get_variable('pl_has_d3d11', default_value: '0') == '1'
+        sources += files('video/out/d3d11/libmpv_pl_d3d11.c')
+    endif
 endif
 
 wayland = {
@@ -1318,6 +1323,9 @@ if features['gl']
                      'video/out/opengl/libmpv_gl.c',
                      'video/out/opengl/ra_gl.c',
                      'video/out/opengl/utils.c')
+    if libplacebo.get_variable('pl_has_opengl', default_value: '0') == '1'
+        sources += files('video/out/opengl/libmpv_pl_gl.c')
+    endif
 elif not features['gl'] and get_option('gl').enabled()
     error('gl enabled but no OpenGL video output could be found!')
 endif
@@ -1340,6 +1348,9 @@ if features['vulkan']
                      'video/out/vulkan/context.c',
                      'video/out/vulkan/utils.c',
                      'video/filter/vf_gpu_vulkan.c')
+    if libplacebo.get_variable('pl_has_vulkan', default_value: '0') == '1'
+        sources += files('video/out/vulkan/libmpv_pl_vulkan.c')
+    endif
 endif
 
 if features['vulkan'] and features['android']
@@ -1834,7 +1845,8 @@ if get_option('libmpv')
                  description: 'mpv media player client library')
 
     headers = ['include/mpv/client.h', 'include/mpv/render.h',
-               'include/mpv/render_gl.h', 'include/mpv/stream_cb.h']
+               'include/mpv/render_gl.h', 'include/mpv/render_d3d11.h',
+               'include/mpv/render_vulkan.h', 'include/mpv/stream_cb.h']
     install_headers(headers, subdir: 'mpv')
 
     # Allow projects to build with libmpv by cloning into ./subprojects/mpv
