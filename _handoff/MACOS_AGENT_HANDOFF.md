@@ -11,15 +11,13 @@
 
 ### Current local worktrees (2026-07-13)
 
-| Checkout | Branch / commit | Purpose |
+| Checkout | Branch | Purpose |
 |---|---|---|
-| `/Users/leo/depy/mpv` | `agent/macos-handoff` / `067fa72d2894bbffaa3d2fb262d31ff6747cd8bb` | Mac libmpv build and validation harness worktree. |
-| `/Users/leo/depy/arca` | `agent/arca-nongpl-release` / `d278644dc745a48095d1b2aaaf4608653c7601df` | ARCA source to port next. Its macOS shell remains a SwiftUI stub. |
+| `/Users/leo/depy/mpv` | `agent/macos-handoff` | Mac libmpv build and validation harness worktree. |
+| `/Users/leo/depy/arca` | `agent/arca-nongpl-release` | ARCA source to port next. Its macOS shell remains a SwiftUI stub. |
 
-The mpv worktree has deliberate, uncommitted macOS harness changes in
-`_golden/render_api/` plus local build material in `_deps/` (untracked). Do not
-delete `_deps/`, `build-macos-minimal/`, or the ignored macOS baseline unless a
-clean rebuild is intended.
+The harness source is tracked. Local build material remains under `_deps/` and
+`build-macos-minimal/`; keep it unless a clean rebuild is intended.
 
 ## What already exists
 
